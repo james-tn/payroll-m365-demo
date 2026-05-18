@@ -155,6 +155,17 @@ async def _handle_conversation_update(activity: dict) -> Response:
     settings = get_settings()
     members_added = activity.get("membersAdded") or []
     bot_id = (activity.get("recipient") or {}).get("id", "")
+    # Capture the ConversationReference even before the user types - this lets later
+    # proactive pushes (e.g. from an email handoff) find the chat.
+    conv_store = get_conversation_store()
+    for persona in ("payroll_admin", "payroll_manager"):
+        try:
+            stored = conv_store.upsert_from_activity(activity, persona=persona)
+            conv_store.alias_to_emails(
+                stored, [settings.demo_admin_email, settings.demo_manager_email]
+            )
+        except Exception as e:
+            logger.warning("failed to capture conversation ref on update: %s", e)
     for m in members_added:
         if m.get("id") != bot_id:
             # Send welcome
@@ -174,12 +185,21 @@ async def _handle_conversation_update(activity: dict) -> Response:
 
 
 async def _handle_message(activity: dict) -> Response:
+    settings = get_settings()
     persona = await _resolve_persona(activity)
     store = get_conversation_store()
     stored = store.upsert_from_activity(activity, persona=persona)
+    # Also alias under the configured demo email(s) for the OTHER persona so that
+    # an email handoff sent under a different persona key can find this chat.
+    store.alias_to_emails(stored, [settings.demo_admin_email, settings.demo_manager_email])
 
     # If user has a pending context from email CTA, fold it in as extra_context for one turn.
     pending = store.consume_pending_context(stored.user_email, persona)
+    if pending is None:
+        # Also check the canonical demo email keys
+        for em in (settings.demo_admin_email, settings.demo_manager_email):
+            if em:
+                pending = store.consume_pending_context(em, persona) or pending
 
     conv_id = (activity.get("conversation") or {}).get("id", "session")
     user_text = activity.get("text") or "Hello"

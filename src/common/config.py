@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     # Demo personas
     demo_user_email: str = "james.nguyen@microsoft.com"
     demo_user_tenant_id: str = ""
+    demo_admin_email: str = "james.nguyen@microsoft.com"
+    demo_manager_email: str = "james.nguyen@microsoft.com"
 
     # Actionable email
     oam_originator_id: str = ""

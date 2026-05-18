@@ -85,6 +85,31 @@ class ConversationStore:
                 self._by_conv_id[conv_id] = sc
             return sc
 
+    def alias_to_emails(self, sc: "StoredConversation", emails: list[str]) -> None:
+        """Make the same StoredConversation discoverable under additional email keys.
+
+        In the demo a single user (james.nguyen@microsoft.com) plays both personas;
+        Teams may identify them by AAD object id or display name, but the email
+        handoff link claims `sub=<email>`. We index the same reference under every
+        plausible email so `get_by_user(email, persona)` resolves.
+        """
+        if not sc or not sc.conversation_reference:
+            return
+        with self._lock:
+            for em in emails:
+                if not em:
+                    continue
+                key = (em.lower(), sc.persona)
+                alias = StoredConversation(
+                    user_email=em,
+                    user_tenant_id=sc.user_tenant_id,
+                    persona=sc.persona,
+                    surface=sc.surface,
+                    conversation_reference=sc.conversation_reference,
+                    pending_context=self._by_user_persona.get(key, sc).pending_context if self._by_user_persona.get(key) else None,
+                )
+                self._by_user_persona[key] = alias
+
     def get_by_user(self, email: str, persona: str) -> Optional[StoredConversation]:
         with self._lock:
             return self._by_user_persona.get((email.lower(), persona))
