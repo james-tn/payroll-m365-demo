@@ -84,8 +84,14 @@ async def send_email(
         message["recipients"]["cc"] = [{"address": addr} for addr in cc]
     client = get_client()
     poller = client.begin_send(message)
-    op_id = poller._polling_method._operation._initial_response.http_response.headers.get(
-        "operation-location", ""
-    )
-    logger.info("email queued to=%s subject=%r op=%s", to, subject, op_id[-40:] if op_id else "")
-    return op_id
+    # Block briefly for the operation to start; result() returns the full SentEmailResult.
+    # ACS email send is fast — this typically returns in 1-3s.
+    try:
+        result = poller.result()
+        op_id = getattr(result, "id", None) or result.get("id", "") if hasattr(result, "get") else ""
+        status = getattr(result, "status", None) or (result.get("status", "") if hasattr(result, "get") else "")
+    except Exception as e:
+        logger.error("email send failed during polling: %s", e)
+        raise
+    logger.info("email sent to=%s subject=%r op=%s status=%s", to, subject, str(op_id)[-40:], status)
+    return str(op_id)
