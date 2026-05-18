@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     acs_sender_address: str = ""
 
     # Demo personas
-    demo_user_email: str = "janguy@microsoft.com"
+    demo_user_email: str = "james.nguyen@microsoft.com"
     demo_user_tenant_id: str = ""
 
     # Actionable email

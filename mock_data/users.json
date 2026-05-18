@@ -1,7 +1,7 @@
 {
   "users": [
     {
-      "m365_email": "janguy@microsoft.com",
+      "m365_email": "james.nguyen@microsoft.com",
       "m365_tenant_id": "72f988bf-86f3-41af-91ab-2d7cd011db47",
       "flex_user_id": "USR-PA-001",
       "name": "Maria Hernandez",
@@ -11,7 +11,7 @@
       "company_name": "Acme Manufacturing Co."
     },
     {
-      "m365_email": "janguy@microsoft.com",
+      "m365_email": "james.nguyen@microsoft.com",
       "m365_tenant_id": "72f988bf-86f3-41af-91ab-2d7cd011db47",
       "flex_user_id": "USR-PM-001",
       "name": "David Park",

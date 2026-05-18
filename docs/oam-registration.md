@@ -12,7 +12,7 @@ This is a manual portal step; there is no CLI today.
 | Value | This demo |
 |---|---|
 | Sender mailbox | `DoNotReply@8cd3731a-c37e-4ac9-88d0-876dbcf5c3de.azurecomm.net` |
-| Target users (Test Users mode) | `janguy@microsoft.com` |
+| Target users (Test Users mode) | `james.nguyen@microsoft.com` |
 | Public app/website url | `https://github.com/james-tn/payroll-m365-demo` |
 
 > The sender is an **Azure Communication Services Email** Azure-managed domain.
@@ -31,7 +31,7 @@ This is a manual portal step; there is no CLI today.
    | Sender email addresses from which actionable emails will originate | `DoNotReply@8cd3731a-c37e-4ac9-88d0-876dbcf5c3de.azurecomm.net` |
    | Target URLs of actions (one per line) | `https://payroll-m365-demo.politeground-c0ea36c5.eastus2.azurecontainerapps.io/cta/` (must be HTTPS, the prefix is enough) |
    | Scope of submission | **Test Users** (fastest — auto-approved within minutes) |
-   | Test user email addresses | `janguy@microsoft.com` |
+   | Test user email addresses | `james.nguyen@microsoft.com` |
    | Provider Name (logo, public site) | upload anything, e.g. the GitHub repo URL |
 
 3. Submit. You will get an **Originator ID** that looks like

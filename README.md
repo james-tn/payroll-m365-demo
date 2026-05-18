@@ -72,7 +72,7 @@ appears alongside the user's other agents.
 
 From the console you can:
 
-1. **Send admin exception alert** → emails `janguy@microsoft.com` (Maria).
+1. **Send admin exception alert** → emails `james.nguyen@microsoft.com` (Maria).
 2. **Submit batch as Maria → email David** for approval.
 3. **Reset state** to start the demo over.
 
@@ -190,7 +190,7 @@ resource group `payroll-m365-demo-rg`, region `eastus2`.
        └──────────┘    └──────────┘    └──────────────┘
                           ▲                ▲
                           │                │
-                          └── user: janguy@microsoft.com
+                          └── user: james.nguyen@microsoft.com
                               (plays both Maria and David)
 ```
 
