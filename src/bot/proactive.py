@@ -48,17 +48,42 @@ async def _get_app_token() -> str:
     scope = "https://api.botframework.com/.default"
 
     if app_type == "userassignedmsi":
-        # Use the UAMI attached to this Container App. azure-identity walks
-        # IMDS automatically. bot_app_id IS the UAMI's clientId for this case.
-        from azure.identity.aio import ManagedIdentityCredential
-        cred = ManagedIdentityCredential(client_id=s.bot_app_id)
-        try:
-            token_obj = await cred.get_token(scope)
-        finally:
-            await cred.close()
-        _TOKEN_CACHE["token"] = token_obj.token
-        _TOKEN_CACHE["exp"] = int(token_obj.expires_on)
-        logger.info("acquired bot app token via UAMI (expires at %s)", token_obj.expires_on)
+        # Acquire UAMI token directly from IMDS. The Container App injects
+        # IDENTITY_ENDPOINT + IDENTITY_HEADER for managed identity access.
+        import os
+        identity_endpoint = os.environ.get("IDENTITY_ENDPOINT")
+        identity_header = os.environ.get("IDENTITY_HEADER")
+        if identity_endpoint and identity_header:
+            params = {
+                "api-version": "2019-08-01",
+                "resource": "https://api.botframework.com",
+                "client_id": s.bot_app_id,
+            }
+            headers = {"X-IDENTITY-HEADER": identity_header}
+            url = identity_endpoint
+        else:
+            # IMDS fallback (e.g. VM, AKS)
+            params = {
+                "api-version": "2018-02-01",
+                "resource": "https://api.botframework.com",
+                "client_id": s.bot_app_id,
+            }
+            headers = {"Metadata": "true"}
+            url = "http://169.254.169.254/metadata/identity/oauth2/token"
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, params=params, headers=headers)
+            if r.status_code >= 300:
+                logger.error("MSI token request failed status=%d body=%s", r.status_code, r.text[:500])
+                r.raise_for_status()
+            body = r.json()
+        _TOKEN_CACHE["token"] = body["access_token"]
+        # expires_on is unix epoch string for IDENTITY_ENDPOINT, expires_in seconds for IMDS
+        if "expires_on" in body:
+            _TOKEN_CACHE["exp"] = int(body["expires_on"])
+        else:
+            _TOKEN_CACHE["exp"] = now + int(body.get("expires_in", 3600))
+        logger.info("acquired bot app token via UAMI (cached until %s)", _TOKEN_CACHE["exp"])
         return _TOKEN_CACHE["token"]
 
     if not s.bot_app_password:
