@@ -1,8 +1,8 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.22/MicrosoftTeams.schema.json",
   "manifestVersion": "1.22",
-  "version": "0.1.1",
-  "id": "8412d807-a2f1-4890-b106-a500c67e92a5",
+  "version": "0.1.2",
+  "id": "7a6c45d8-629d-40c8-8576-b7c69474331a",
   "developer": {
     "name": "Payroll Demo",
     "websiteUrl": "https://github.com/james-tn/payroll-m365-demo",
@@ -24,7 +24,7 @@
   "accentColor": "#187777",
   "bots": [
     {
-      "botId": "8412d807-a2f1-4890-b106-a500c67e92a5",
+      "botId": "7a6c45d8-629d-40c8-8576-b7c69474331a",
       "scopes": ["personal", "team", "groupChat"],
       "supportsFiles": false,
       "isNotificationOnly": false,
@@ -44,7 +44,7 @@
     "customEngineAgents": [
       {
         "type": "bot",
-        "id": "8412d807-a2f1-4890-b106-a500c67e92a5"
+        "id": "7a6c45d8-629d-40c8-8576-b7c69474331a"
       }
     ]
   },

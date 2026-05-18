@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     bot_app_id: str = ""
     bot_app_password: str = ""
     bot_tenant_id: str = "common"
-    bot_app_type: str = "SingleTenant"
+    bot_app_type: str = "SingleTenant"  # SingleTenant | MultiTenant | UserAssignedMSI
 
     # Azure OpenAI
     azure_openai_endpoint: str = ""

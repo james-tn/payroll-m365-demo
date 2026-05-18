@@ -27,23 +27,47 @@ _TOKEN_CACHE: dict[str, Any] = {"token": None, "exp": 0}
 
 
 async def _get_app_token() -> str:
-    """Get app-only token for the Bot Framework Connector API."""
+    """Get app-only token for the Bot Framework Connector API.
+
+    Supports three bot identity models:
+    - UserAssignedMSI: federated identity via the User Assigned Managed Identity
+      attached to this Container App. Recommended for multi-tenant ISV bots —
+      Bot Framework now hard-deprecates classic multi-tenant client_secret bots.
+    - SingleTenant: client_credentials at the bot's home tenant.
+    - MultiTenant (legacy): client_credentials at botframework.com.
+    """
     now = int(time.time())
     if _TOKEN_CACHE["token"] and _TOKEN_CACHE["exp"] > now + 60:
         return _TOKEN_CACHE["token"]
 
     s = get_settings()
-    if not s.bot_app_id or not s.bot_app_password:
-        raise RuntimeError("BOT_APP_ID / BOT_APP_PASSWORD not configured")
+    if not s.bot_app_id:
+        raise RuntimeError("BOT_APP_ID not configured")
 
-    # For SingleTenant apps, the token endpoint uses the tenant id, not botframework.com.
-    # For multi-tenant bots, use botframework.com tenant.
-    if s.bot_app_type.lower() == "singletenant" and s.bot_tenant_id and s.bot_tenant_id != "common":
+    app_type = (s.bot_app_type or "").lower()
+    scope = "https://api.botframework.com/.default"
+
+    if app_type == "userassignedmsi":
+        # Use the UAMI attached to this Container App. azure-identity walks
+        # IMDS automatically. bot_app_id IS the UAMI's clientId for this case.
+        from azure.identity.aio import ManagedIdentityCredential
+        cred = ManagedIdentityCredential(client_id=s.bot_app_id)
+        try:
+            token_obj = await cred.get_token(scope)
+        finally:
+            await cred.close()
+        _TOKEN_CACHE["token"] = token_obj.token
+        _TOKEN_CACHE["exp"] = int(token_obj.expires_on)
+        logger.info("acquired bot app token via UAMI (expires at %s)", token_obj.expires_on)
+        return _TOKEN_CACHE["token"]
+
+    if not s.bot_app_password:
+        raise RuntimeError("BOT_APP_PASSWORD required for SingleTenant/MultiTenant bots")
+
+    if app_type == "singletenant" and s.bot_tenant_id and s.bot_tenant_id != "common":
         tenant = s.bot_tenant_id
-        scope = f"{s.bot_app_id}/.default" if False else "https://api.botframework.com/.default"
     else:
         tenant = "botframework.com"
-        scope = "https://api.botframework.com/.default"
 
     url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
     data = {
@@ -58,7 +82,7 @@ async def _get_app_token() -> str:
         body = r.json()
     _TOKEN_CACHE["token"] = body["access_token"]
     _TOKEN_CACHE["exp"] = now + int(body.get("expires_in", 3600))
-    logger.info("acquired bot app token (expires in %ss)", body.get("expires_in"))
+    logger.info("acquired bot app token via client_credentials (expires in %ss)", body.get("expires_in"))
     return _TOKEN_CACHE["token"]
 
 
