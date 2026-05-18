@@ -1,0 +1,22 @@
+{
+  "company": {
+    "id": "ACME-MFG-001",
+    "name": "Acme Manufacturing Co.",
+    "tax_id": "**-***1842",
+    "industry": "Manufacturing",
+    "headcount": 142,
+    "billing_plan": "PayCycle Enterprise"
+  },
+  "current_cycle": {
+    "id": "CYC-2026-05B",
+    "label": "Pay period ending May 30, 2026",
+    "period_start": "2026-05-17",
+    "period_end": "2026-05-30",
+    "pay_date": "2026-06-05",
+    "status": "review",
+    "deadline": "2026-06-03T17:00:00-07:00",
+    "estimated_gross": 487213.45,
+    "estimated_net": 342108.91,
+    "employees_included": 142
+  }
+}

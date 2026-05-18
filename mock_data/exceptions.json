@@ -1,0 +1,33 @@
+[
+  {
+    "id": "EXC-2026-05B-001",
+    "cycle_id": "CYC-2026-05B",
+    "severity": "warning",
+    "category": "overtime_variance",
+    "title": "Overtime variance exceeds threshold",
+    "employee_id": "EMP-1042",
+    "employee_name": "Joseph Smith",
+    "amount_impact": 808.50,
+    "detected_at": "2026-05-31T02:14:00-07:00",
+    "summary": "Overtime of 14.0h is 3.4x trailing 6-period average (4.1h). Exceeds variance threshold of 2.5x.",
+    "rule_id": "OT-VAR-2.5X",
+    "status": "open",
+    "assigned_to_role": "payroll_admin"
+  },
+  {
+    "id": "EXC-2026-05B-002",
+    "cycle_id": "CYC-2026-05B",
+    "severity": "info",
+    "category": "missing_manager_approval",
+    "title": "PTO request without manager approval",
+    "employee_id": "EMP-1108",
+    "employee_name": "Sarah Lee",
+    "amount_impact": 277.20,
+    "detected_at": "2026-05-31T02:14:00-07:00",
+    "summary": "6.0h PTO submitted May 26 by employee, awaiting approval from Daniel Cruz. Pay cycle close in 3 days.",
+    "rule_id": "PTO-APPROVAL-REQUIRED",
+    "status": "open",
+    "assigned_to_role": "payroll_admin",
+    "related_request_id": "PTO-9821"
+  }
+]

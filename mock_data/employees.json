@@ -1,0 +1,64 @@
+[
+  {
+    "id": "EMP-1042",
+    "name": "Joseph Smith",
+    "title": "Senior Machinist",
+    "department": "Production - Line 2",
+    "manager": "Patricia Owens",
+    "manager_id": "EMP-2003",
+    "hire_date": "2019-03-04",
+    "status": "active",
+    "comp_type": "hourly",
+    "hourly_rate": 38.50,
+    "annual_base": 80080.00,
+    "current_period": {
+      "regular_hours": 80.0,
+      "overtime_hours": 14.0,
+      "pto_hours": 0.0,
+      "gross": 3888.50
+    },
+    "trailing_6_periods": [
+      {"regular": 80.0, "overtime": 2.5, "pto": 0.0},
+      {"regular": 80.0, "overtime": 1.0, "pto": 0.0},
+      {"regular": 72.0, "overtime": 0.0, "pto": 8.0},
+      {"regular": 80.0, "overtime": 3.0, "pto": 0.0},
+      {"regular": 80.0, "overtime": 4.5, "pto": 0.0},
+      {"regular": 80.0, "overtime": 2.0, "pto": 0.0}
+    ],
+    "notes": "Assigned to Project Atlas tooling rebuild starting May 18 - approved overtime authorized by P. Owens"
+  },
+  {
+    "id": "EMP-1108",
+    "name": "Sarah Lee",
+    "title": "Quality Engineer",
+    "department": "Quality Assurance",
+    "manager": "Daniel Cruz",
+    "manager_id": "EMP-2017",
+    "hire_date": "2022-09-12",
+    "status": "active",
+    "comp_type": "salary",
+    "annual_base": 92400.00,
+    "current_period": {
+      "regular_hours": 74.0,
+      "overtime_hours": 0.0,
+      "pto_hours": 6.0,
+      "gross": 3553.85
+    },
+    "trailing_6_periods": [
+      {"regular": 80.0, "overtime": 0.0, "pto": 0.0},
+      {"regular": 80.0, "overtime": 0.0, "pto": 0.0},
+      {"regular": 80.0, "overtime": 0.0, "pto": 0.0},
+      {"regular": 72.0, "overtime": 0.0, "pto": 8.0},
+      {"regular": 80.0, "overtime": 0.0, "pto": 0.0},
+      {"regular": 80.0, "overtime": 0.0, "pto": 0.0}
+    ],
+    "pto_request": {
+      "id": "PTO-9821",
+      "submitted": "2026-05-26",
+      "hours": 6.0,
+      "manager_approved": false,
+      "reason": "Medical appointment"
+    },
+    "notes": "PTO request from May 26 still pending Daniel Cruz approval."
+  }
+]
