@@ -144,7 +144,6 @@ def _build_llm() -> AzureChatOpenAI:
         api_key=s.azure_openai_api_key,
         azure_deployment=s.azure_openai_deployment,
         api_version=s.azure_openai_api_version,
-        temperature=0.2,
         timeout=45,
         max_retries=2,
     )
