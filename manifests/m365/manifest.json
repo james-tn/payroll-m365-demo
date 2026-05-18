@@ -1,0 +1,57 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.19",
+  "version": "0.1.0",
+  "id": "8412d807-a2f1-4890-b106-a500c67e92a5",
+  "packageName": "com.example.payrollm365demo",
+  "developer": {
+    "name": "Payroll Demo",
+    "websiteUrl": "https://github.com/james-tn/payroll-m365-demo",
+    "privacyUrl": "https://github.com/james-tn/payroll-m365-demo/blob/main/README.md",
+    "termsOfUseUrl": "https://github.com/james-tn/payroll-m365-demo/blob/main/README.md"
+  },
+  "name": {
+    "short": "PayCycle Assistant",
+    "full": "PayCycle Payroll Assistant (Demo)"
+  },
+  "description": {
+    "short": "Resolve payroll exceptions and approve batches from Teams or Copilot.",
+    "full": "PayCycle Assistant is a demo Custom Engine Agent that lets payroll admins and managers resolve exception alerts, get coaching on overtime variance and missing approvals, and approve pay batches without leaving Microsoft 365. Notifications start in Outlook and continue in Teams or Microsoft 365 Copilot with full context preserved."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#187777",
+  "bots": [
+    {
+      "botId": "8412d807-a2f1-4890-b106-a500c67e92a5",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": ["personal"],
+          "commands": [
+            { "title": "status", "description": "Show the current pay cycle status" },
+            { "title": "exceptions", "description": "List open payroll exceptions" },
+            { "title": "approve last batch", "description": "Approve the most recent submitted batch" }
+          ]
+        }
+      ]
+    }
+  ],
+  "copilotAgents": {
+    "customEngineAgents": [
+      {
+        "type": "bot",
+        "id": "8412d807-a2f1-4890-b106-a500c67e92a5"
+      }
+    ]
+  },
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": [
+    "payroll-m365-demo.politeground-c0ea36c5.eastus2.azurecontainerapps.io",
+    "token.botframework.com"
+  ]
+}
