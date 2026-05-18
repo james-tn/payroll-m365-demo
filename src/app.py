@@ -260,6 +260,17 @@ async def _handle_message(activity: dict) -> Response:
             if em:
                 pending = store.consume_pending_context(em, persona) or pending
 
+    # If pending context carries a deferred card (because the email click happened
+    # before we had a conv ref), send the card NOW and prepend a short intro - skip
+    # the LLM round-trip for this turn.
+    pending_card = (pending or {}).get("pending_card") if pending else None
+    if pending_card:
+        intro = (pending or {}).get("pending_card_text") or "📨 Continuing from your email:"
+        logger.info("handoff: replaying deferred card from pending_context for user=%s persona=%s event=%s",
+                    stored.user_email, persona, ((pending or {}).get("event_id") or "")[:8])
+        await _reply_to_activity(activity, [pending_card], intro)
+        return JSONResponse({"status": "ok"}, status_code=200)
+
     conv_id = (activity.get("conversation") or {}).get("id", "session")
     user_text = activity.get("text") or "Hello"
 
@@ -635,26 +646,38 @@ async def cta_handoff(request: Request) -> Response:
             pushed = True
             if jti:
                 _mark_push_done(jti)
+            logger.info("handoff: pushed worklist card to user=%s persona=%s jti=%s",
+                        user_email, persona, jti[:8] if jti else "-")
         except Exception as e:
-            logger.warning("proactive push failed: %s", e)
+            logger.warning("handoff: proactive push failed user=%s err=%s: %s",
+                           user_email, type(e).__name__, e)
+    else:
+        # No stored conversation reference - user hasn't opened the chat in this
+        # bot deployment yet. We'll stash the card and intent in pending_context so
+        # their first message in Teams triggers the worklist card.
+        logger.warning(
+            "handoff: NO stored conv ref for user=%s persona=%s - card stashed in "
+            "pending_context, will be sent on user's next message",
+            user_email, persona,
+        )
 
-    # Also set pending_context for the canonical demo emails (the JWT 'sub' may not
-    # exactly match what Teams sends us as the user identity).
-    for em in (settings.demo_admin_email, settings.demo_manager_email):
-        if em:
-            conv_store.set_pending_context(em, persona, {
-                "batch_id": batch_id,
-                "intent": intent,
-                "from_email_link": True,
-                "source_event": claims.get("event", ""),
-            })
-    # Set pending context so the agent's first turn in this chat knows what we're discussing
-    conv_store.set_pending_context(user_email, persona, {
+    # Stash the FULL card + intent in pending_context so even if proactive push
+    # failed (or there's no conv ref yet), the user's first message in Teams
+    # will trigger the same worklist card to be sent. We index this under both
+    # the JWT sub AND the canonical demo emails since the Teams user identity
+    # may not exactly match the JWT sub claim.
+    pending_payload = {
         "batch_id": batch_id,
         "intent": intent,
+        "event_id": event_id,
         "from_email_link": True,
         "source_event": claims.get("event", ""),
-    })
+        "pending_card": card,
+        "pending_card_text": "📨 Continuing from your email — here's the work waiting for you:",
+    }
+    for em in (user_email, settings.demo_admin_email, settings.demo_manager_email):
+        if em:
+            conv_store.set_pending_context(em, persona, pending_payload)
 
     # Redirect to the Teams deep link
     deep_link = f"https://teams.microsoft.com/l/chat/0/0?users=28:{settings.bot_app_id}"
@@ -670,8 +693,9 @@ async def cta_handoff(request: Request) -> Response:
     if not pushed and not already:
         html = _simple_redirect_page(
             "Opening PayCycle in Teams...",
-            f"It looks like you haven't talked with the PayCycle agent in {surface.title()} yet. "
-            f"It will open in a moment - just say hi and the agent will pick up the context.",
+            f"Your payroll work is waiting in Teams. We'll open the chat — just send any "
+            f"message (a quick 'hi' works) and PayCycle will load your exception worklist "
+            f"for this email right away.",
             deep_link,
         )
         return HTMLResponse(html, status_code=200)
