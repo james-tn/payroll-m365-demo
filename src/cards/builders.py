@@ -260,6 +260,153 @@ def build_action_confirmation(title: str, message: str, sub: Optional[str] = Non
 
 # ---- Card: proactive card pushed into Teams/Copilot ----
 
+def build_exception_worklist_card(
+    *,
+    event_id: str,
+    batch_id: str,
+    company_name: str,
+    cycle_label: str,
+    deadline_iso: str,
+    exceptions: list[dict],
+    totals: dict,
+    persona: str = "payroll_admin",
+    user_email: str = "",
+) -> dict:
+    """Card pushed into Teams when the admin clicks 'Review in Teams' from an
+    exception-alert email. Each exception is a self-contained row with
+    deterministic action buttons (Approve / Flag / Explain) that carry the
+    event_id so the bot knows which email's card this came from.
+
+    Multiple emails -> multiple cards in the same chat, each independent.
+    """
+    n = sum(1 for e in exceptions if e.get("status") == "open")
+    n_resolved = sum(1 for e in exceptions if e.get("status") != "open")
+    deadline_display = deadline_iso.replace("T", " ").split("+")[0] + " local"
+
+    body: list[dict] = [
+        {
+            "type": "Container",
+            "items": [
+                {"type": "TextBlock", "text": f"🔔 {n} exception{'s' if n != 1 else ''} to review",
+                 "size": "Large", "weight": "Bolder", "wrap": True},
+                {"type": "TextBlock", "text": f"{company_name} · {cycle_label}",
+                 "isSubtle": True, "spacing": "None", "wrap": True},
+                {"type": "TextBlock",
+                 "text": "Continued from your email — full context loaded for this batch.",
+                 "isSubtle": True, "spacing": "Small", "wrap": True},
+            ],
+        }
+    ]
+
+    if n_resolved:
+        body.append({
+            "type": "TextBlock",
+            "text": f"_{n_resolved} of these were resolved after the email was sent_",
+            "isSubtle": True, "wrap": True, "spacing": "Small",
+        })
+
+    for exc in exceptions:
+        is_open = exc.get("status") == "open"
+        ctx = {
+            "event_id": event_id,
+            "batch_id": batch_id,
+            "exception_id": exc["id"],
+            "employee_id": exc["employee_id"],
+            "persona": persona,
+        }
+        row_items: list[dict] = [
+            {
+                "type": "ColumnSet",
+                "columns": [
+                    {
+                        "type": "Column", "width": "stretch",
+                        "items": [
+                            {"type": "TextBlock", "text": exc["employee_name"], "weight": "Bolder", "wrap": True},
+                            {"type": "TextBlock", "text": f"{exc['title']} · {exc['id']}",
+                             "isSubtle": True, "spacing": "None", "wrap": True, "size": "Small"},
+                        ],
+                    },
+                    {
+                        "type": "Column", "width": "auto",
+                        "items": [
+                            {"type": "TextBlock", "text": _money(exc["amount_impact"]),
+                             "weight": "Bolder", "horizontalAlignment": "Right"},
+                            {"type": "TextBlock", "text": exc["severity"].upper(),
+                             "size": "Small", "color": _sev_color(exc["severity"]),
+                             "horizontalAlignment": "Right", "spacing": "None"},
+                        ],
+                    },
+                ],
+            },
+            {"type": "TextBlock", "text": exc["summary"], "wrap": True, "spacing": "Small", "size": "Small"},
+        ]
+
+        if is_open:
+            row_items.append({
+                "type": "ActionSet",
+                "spacing": "Small",
+                "actions": [
+                    {"type": "Action.Execute", "title": "✅ Approve", "verb": "approve_exception",
+                     "data": {"verb": "approve_exception", **ctx}, "style": "positive"},
+                    {"type": "Action.Execute", "title": "🚩 Flag for HR", "verb": "flag_exception",
+                     "data": {"verb": "flag_exception", **ctx}},
+                    {"type": "Action.Execute", "title": "💡 Explain", "verb": "explain_exception",
+                     "data": {"verb": "explain_exception", **ctx}},
+                ],
+            })
+        else:
+            row_items.append({
+                "type": "TextBlock",
+                "text": f"✓ Resolved by {exc.get('resolved_by', 'system')}",
+                "color": "good", "size": "Small", "spacing": "Small",
+            })
+
+        body.append({
+            "type": "Container",
+            "style": _sev_color(exc["severity"]) if is_open else "emphasis",
+            "spacing": "Medium",
+            "items": row_items,
+        })
+
+    body.append({
+        "type": "Container", "spacing": "Medium",
+        "items": [
+            {"type": "TextBlock",
+             "text": f"Cycle: {totals.get('employees', 0):,} employees · {_money(totals.get('gross', 0))} gross",
+             "isSubtle": True, "size": "Small", "wrap": True},
+            {"type": "TextBlock", "text": f"⏰ Deadline: {deadline_display}",
+             "isSubtle": True, "size": "Small", "spacing": "None", "wrap": True},
+        ],
+    })
+
+    actions: list[dict] = []
+    if any(e.get("status") == "open" for e in exceptions):
+        actions.append({
+            "type": "Action.Execute", "title": "✅ Approve all & submit batch",
+            "verb": "approve_all_and_submit", "style": "positive",
+            "data": {
+                "verb": "approve_all_and_submit",
+                "event_id": event_id,
+                "batch_id": batch_id,
+                "exception_ids": [e["id"] for e in exceptions if e.get("status") == "open"],
+                "persona": persona,
+                "approver": user_email,
+            },
+        })
+    actions.append({
+        "type": "Action.Execute", "title": "💬 Discuss with PayCycle agent", "verb": "discuss_batch",
+        "data": {"verb": "discuss_batch", "event_id": event_id, "batch_id": batch_id, "persona": persona},
+    })
+
+    return {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.5",
+        "body": body,
+        "actions": actions,
+    }
+
+
 def build_teams_continuation_card(
     title: str,
     summary: str,
@@ -268,9 +415,8 @@ def build_teams_continuation_card(
     primary_action_label: Optional[str] = None,
     primary_action_data: Optional[dict] = None,
 ) -> dict:
-    """Card pushed into Teams chat after user clicks 'Get details in Teams' from email.
-
-    Includes Action.Execute buttons that round-trip back to the bot via invoke activity.
+    """Legacy continuation card. Retained for the manager-approval handoff path
+    until that is migrated to a worklist-style card.
     """
     body = [
         {"type": "TextBlock", "text": title, "size": "Large", "weight": "Bolder", "wrap": True},

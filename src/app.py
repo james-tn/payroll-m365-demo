@@ -26,6 +26,7 @@ from .bot.proactive import _get_app_token, push_card_to_stored
 from .cards.builders import (
     build_action_confirmation,
     build_admin_exception_notification,
+    build_exception_worklist_card,
     build_manager_approval_request,
     build_teams_continuation_card,
 )
@@ -286,29 +287,108 @@ async def _handle_invoke(activity: dict) -> Response:
     value = activity.get("value") or {}
     action_data = (value.get("action") or {}).get("data") or {}
     verb = action_data.get("verb", "")
-    logger.info("invoke verb=%s data=%s", verb, action_data)
+    event_id = action_data.get("event_id", "")
+    logger.info("invoke verb=%s event=%s data=%s", verb, event_id[:8] if event_id else "-", action_data)
+
+    store = get_store()
+    actor = (activity.get("from") or {}).get("name") or "user"
+
+    if verb == "approve_exception":
+        exc_id = action_data.get("exception_id", "")
+        try:
+            exc = store.resolve_exception(
+                exc_id,
+                resolver=f"{actor} (Payroll Admin)",
+                notes=f"Approved via Teams card · event {event_id[:8]}",
+            )
+            card = build_action_confirmation(
+                title=f"✅ {exc['employee_name']} approved",
+                message=f"{exc['title']} ({exc['id']}) resolved.",
+                sub=f"+{_format_money(exc['amount_impact'])} included in batch.",
+            )
+            return _invoke_card_response(card)
+        except KeyError:
+            return _invoke_card_response(build_action_confirmation(
+                title="Exception not found", message=f"Could not find {exc_id}", style="error"))
+
+    if verb == "flag_exception":
+        exc_id = action_data.get("exception_id", "")
+        exc = store.get_exception(exc_id)
+        if not exc:
+            return _invoke_card_response(build_action_confirmation(
+                title="Exception not found", message=f"Could not find {exc_id}", style="error"))
+        # Don't resolve - just record the audit and tell the user we'll route it.
+        logger.info("exception flagged for HR: %s by %s", exc_id, actor)
+        card = build_action_confirmation(
+            title=f"🚩 Flagged for HR",
+            message=f"{exc['employee_name']} · {exc['title']} routed to HR review.",
+            sub="Exception remains open until HR resolution.",
+            style="warning",
+        )
+        return _invoke_card_response(card)
+
+    if verb == "explain_exception":
+        exc_id = action_data.get("exception_id", "")
+        exc = store.get_exception(exc_id)
+        if not exc:
+            return _invoke_card_response(build_action_confirmation(
+                title="Exception not found", message=f"Could not find {exc_id}", style="error"))
+        explanation = _build_exception_explanation(exc, store)
+        card = build_action_confirmation(
+            title=f"💡 {exc['employee_name']} · {exc['title']}",
+            message=explanation,
+            sub=f"Exception {exc['id']} · {exc['severity'].upper()}",
+            style="info",
+        )
+        return _invoke_card_response(card)
+
+    if verb == "approve_all_and_submit":
+        batch_id = action_data.get("batch_id", "")
+        exception_ids = action_data.get("exception_ids", []) or []
+        approver = action_data.get("approver") or actor
+        resolved_count = 0
+        for eid in exception_ids:
+            try:
+                store.resolve_exception(eid, resolver=f"{actor} (Payroll Admin)",
+                                        notes=f"Approved via batch action · event {event_id[:8]}")
+                resolved_count += 1
+            except KeyError:
+                continue
+        try:
+            batch = store.submit_batch(batch_id, submitted_by=actor,
+                                       admin_notes=f"All {resolved_count} exceptions approved from Teams card.")
+            card = build_action_confirmation(
+                title=f"✅ Batch {batch_id} submitted",
+                message=f"{resolved_count} exception{'s' if resolved_count != 1 else ''} approved · batch sent to manager for approval.",
+                sub=f"{batch['totals']['employees']:,} employees · ${batch['totals']['gross']:,.2f} gross",
+            )
+        except ValueError as e:
+            card = build_action_confirmation(
+                title="Batch already submitted",
+                message=str(e), style="warning",
+            )
+        return _invoke_card_response(card)
+
+    if verb == "discuss_batch":
+        card = build_action_confirmation(
+            title="Type your question",
+            message="Ask me anything about this batch - totals, employees, exceptions, history.",
+            style="info",
+        )
+        return _invoke_card_response(card)
 
     if verb == "approve_batch":
         batch_id = action_data.get("batch_id", "")
         try:
-            batch = get_store().approve_batch(batch_id, approved_by=action_data.get("approver", "manager"))
+            batch = store.approve_batch(batch_id, approved_by=action_data.get("approver", "manager"))
             card = build_action_confirmation(
                 title="✅ Batch approved",
                 message=f"Batch {batch['id']} approved at {batch['approved_at']}.",
-                sub=f"{batch['totals']['employees']} employees · ${batch['totals']['gross']:,.2f} gross",
+                sub=f"{batch['totals']['employees']:,} employees · ${batch['totals']['gross']:,.2f} gross",
             )
-            return JSONResponse({
-                "statusCode": 200,
-                "type": "application/vnd.microsoft.card.adaptive",
-                "value": card,
-            })
         except (KeyError, ValueError) as e:
             card = build_action_confirmation(title="Unable to approve", message=str(e), style="error")
-            return JSONResponse({
-                "statusCode": 200,
-                "type": "application/vnd.microsoft.card.adaptive",
-                "value": card,
-            })
+        return _invoke_card_response(card)
 
     if verb == "ask":
         card = build_action_confirmation(
@@ -316,22 +396,49 @@ async def _handle_invoke(activity: dict) -> Response:
             message="Just type your question in the chat below and I'll dig in.",
             style="info",
         )
-        return JSONResponse({
-            "statusCode": 200,
-            "type": "application/vnd.microsoft.card.adaptive",
-            "value": card,
-        })
+        return _invoke_card_response(card)
 
     card = build_action_confirmation(
         title="Action received",
         message=f"Got it: {verb}",
         style="info",
     )
+    return _invoke_card_response(card)
+
+
+def _invoke_card_response(card: dict) -> JSONResponse:
     return JSONResponse({
         "statusCode": 200,
         "type": "application/vnd.microsoft.card.adaptive",
         "value": card,
     })
+
+
+def _format_money(amount: float) -> str:
+    return f"${amount:,.2f}"
+
+
+def _build_exception_explanation(exc: dict, store: Any) -> str:
+    """Produce a one-card explanation of an exception using store-side facts."""
+    if exc.get("category") == "overtime_variance":
+        stats = store.compute_overtime_stats(exc["employee_id"]) or {}
+        return (
+            f"{exc['summary']}\n\n"
+            f"Trailing 6-period avg OT: {stats.get('trailing_avg_overtime_hours', '—')} hrs · "
+            f"stdev {stats.get('trailing_stdev_overtime_hours', '—')} hrs.\n"
+            f"This period: {stats.get('current_overtime_hours', '—')} hrs "
+            f"(ratio {stats.get('variance_ratio', '—')}x).\n\n"
+            f"Common drivers: holiday cover, shift swaps, special project, missing time-off entry. "
+            f"Use 'Approve' if validated, 'Flag for HR' if you want a second pair of eyes."
+        )
+    if exc.get("category") == "missing_manager_approval":
+        return (
+            f"{exc['summary']}\n\n"
+            f"PTO requests must be approved by the employee's direct manager before they "
+            f"can post to payroll. Approving here will record your override; flagging will "
+            f"notify HR to chase the manager for approval before close."
+        )
+    return exc.get("summary", "No additional detail available for this exception.")
 
 
 async def _reply_to_activity(activity: dict, cards: list[dict], text: str = "") -> None:
@@ -450,37 +557,61 @@ async def cta_handoff(request: Request) -> Response:
     user_email = claims.get("sub", settings.demo_user_email)
     batch_id = claims.get("batch_id", "BATCH-2026-05B")
     intent = claims.get("intent", "discuss")
+    event_id = claims.get("jti", "")
+    snapshot_exception_ids = claims.get("exception_ids") or []
 
-    # Build the context card
     store = get_store()
     batch = store.get_batch(batch_id)
     if not batch:
         return HTMLResponse(_simple_error_page("Batch not found", batch_id), status_code=404)
-    facts = [
-        {"title": "Batch", "value": batch["id"]},
-        {"title": "Cycle", "value": batch["cycle_label"]},
-        {"title": "Status", "value": batch["status"].title()},
-        {"title": "Employees", "value": str(batch["totals"]["employees"])},
-        {"title": "Gross", "value": f"${batch['totals']['gross']:,.2f}"},
-    ]
-    summary = (
-        "I've loaded the batch details. Ask me anything about the exceptions, "
-        "the totals, or any employee's history. I have the full payroll context for this cycle."
-    )
-    primary_label = None
-    primary_data = None
-    if persona == "payroll_manager" and batch["status"] == "submitted":
-        primary_label = "✅ Approve this batch"
-        primary_data = {"verb": "approve_batch", "batch_id": batch_id, "approver": user_email}
+    company = store.get_company()
+    cycle = store.get_current_cycle()
 
-    card = build_teams_continuation_card(
-        title=f"Payroll context · {batch['cycle_label']}",
-        summary=summary,
-        facts=facts,
-        base_url=settings.app_base_url,
-        primary_action_label=primary_label,
-        primary_action_data=primary_data,
-    )
+    # Decide which card type to build based on intent
+    if intent == "review_exceptions" and snapshot_exception_ids:
+        # Load CURRENT state of the exceptions snapshotted at email-send time.
+        # If any have been resolved since, the card will show them as resolved.
+        exceptions = [e for e in (store.get_exception(eid) for eid in snapshot_exception_ids) if e]
+        card = build_exception_worklist_card(
+            event_id=event_id,
+            batch_id=batch_id,
+            company_name=company["name"],
+            cycle_label=cycle["label"],
+            deadline_iso=cycle["deadline"],
+            exceptions=exceptions,
+            totals=batch["totals"],
+            persona=persona,
+            user_email=user_email,
+        )
+    else:
+        # Manager approval / generic discuss path - keep the simpler context card.
+        facts = [
+            {"title": "Batch", "value": batch["id"]},
+            {"title": "Cycle", "value": batch["cycle_label"]},
+            {"title": "Status", "value": batch["status"].title()},
+            {"title": "Employees", "value": f"{batch['totals']['employees']:,}"},
+            {"title": "Gross", "value": f"${batch['totals']['gross']:,.2f}"},
+        ]
+        summary = (
+            "I've loaded the batch details. Ask me anything about totals, exceptions, "
+            "or any employee's history - I have the full payroll context for this cycle."
+        )
+        primary_label = None
+        primary_data = None
+        if persona == "payroll_manager" and batch["status"] == "submitted":
+            primary_label = "✅ Approve this batch"
+            primary_data = {
+                "verb": "approve_batch", "batch_id": batch_id,
+                "approver": user_email, "event_id": event_id,
+            }
+        card = build_teams_continuation_card(
+            title=f"Payroll context · {batch['cycle_label']}",
+            summary=summary,
+            facts=facts,
+            base_url=settings.app_base_url,
+            primary_action_label=primary_label,
+            primary_action_data=primary_data,
+        )
 
     # Attempt proactive push to the stored conversation - but DEDUP first.
     # The same handoff URL is GETted multiple times by Defender Safe Links scrubbers,

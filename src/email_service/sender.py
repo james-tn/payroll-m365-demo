@@ -59,16 +59,29 @@ async def send_email(
     *,
     to: str,
     subject: str,
-    card: dict,
-    fallback_text: str,
+    card: Optional[dict] = None,
+    fallback_text: str = "",
     fallback_link: Optional[str] = None,
+    html_body: Optional[str] = None,
+    plain_text: Optional[str] = None,
     cc: Optional[list[str]] = None,
 ) -> str:
-    """Send an actionable card email via ACS. Returns the operation id (for tracking)."""
+    """Send email via ACS. Returns the operation id (for tracking).
+
+    Two modes:
+      - html_body= : send the supplied HTML directly (plain-HTML emails, Defender-safe)
+      - card=      : legacy actionable-card mode; wraps the card in OAM script tag
+                     (kept for back-compat; subject to Defender stripping)
+    """
     s = get_settings()
     if not s.acs_sender_address:
         raise RuntimeError("ACS_SENDER_ADDRESS not set")
-    html = _adaptive_card_email_html(card, fallback_text, fallback_link)
+    if html_body is None and card is None:
+        raise ValueError("Either html_body or card must be provided")
+    if html_body is None:
+        html_body = _adaptive_card_email_html(card, fallback_text, fallback_link)
+    if plain_text is None:
+        plain_text = fallback_text or "PayCycle notification"
     message = {
         "senderAddress": s.acs_sender_address,
         "recipients": {
@@ -76,16 +89,14 @@ async def send_email(
         },
         "content": {
             "subject": subject,
-            "plainText": fallback_text,
-            "html": html,
+            "plainText": plain_text,
+            "html": html_body,
         },
     }
     if cc:
         message["recipients"]["cc"] = [{"address": addr} for addr in cc]
     client = get_client()
     poller = client.begin_send(message)
-    # Block briefly for the operation to start; result() returns the full SentEmailResult.
-    # ACS email send is fast — this typically returns in 1-3s.
     try:
         result = poller.result()
         op_id = getattr(result, "id", None) or result.get("id", "") if hasattr(result, "get") else ""

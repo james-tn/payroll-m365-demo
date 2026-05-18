@@ -13,6 +13,10 @@ from ..common.config import get_settings
 from ..common.logging import get_logger
 from ..common.tokens import mint
 from ..email_service.sender import send_email
+from ..email_service.templates import (
+    render_admin_exception_email,
+    render_manager_approval_email,
+)
 from ..flex.store import get_store
 
 router = APIRouter()
@@ -203,11 +207,13 @@ async def send_admin_alert() -> RedirectResponse:
             "batch_id": "BATCH-2026-05B",
             "intent": "review_exceptions",
             "event": f"alert/{cycle['id']}",
+            "exception_ids": [e["id"] for e in exceptions],
         },
         ttl_seconds=86400,
     )
 
-    card = build_admin_exception_notification(
+    # Build the OAM card for inline rendering inside Outlook (when supported).
+    inline_card = build_admin_exception_notification(
         company_name=company["name"],
         cycle_label=cycle["label"],
         deadline_iso=cycle["deadline"],
@@ -216,13 +222,25 @@ async def send_admin_alert() -> RedirectResponse:
         discuss_token=handoff_token,
     )
 
+    html_body, plain_text = render_admin_exception_email(
+        admin_name="Maria",
+        company_name=company["name"],
+        cycle_label=cycle["label"],
+        deadline_iso=cycle["deadline"],
+        exceptions=exceptions,
+        handoff_token=handoff_token,
+        base_url=s.app_base_url,
+        total_employees=cycle.get("employees_included", 0),
+        total_gross=cycle.get("estimated_gross", 0),
+        inline_card=inline_card,
+    )
+
     try:
         await send_email(
             to=s.demo_user_email,
-            subject=f"[PayCycle] {len(exceptions)} exceptions need review · {cycle['label']}",
-            card=card,
-            fallback_text=f"{len(exceptions)} payroll exceptions need your attention for {cycle['label']}.",
-            fallback_link=f"{s.app_base_url}/cta/handoff?token={handoff_token}&surface=teams",
+            subject=f"🔔 {len(exceptions)} payroll exception{'s' if len(exceptions) != 1 else ''} need review · {cycle['label']}",
+            html_body=html_body,
+            plain_text=plain_text,
         )
         flash = f"Admin alert email queued to {s.demo_user_email}. Check the inbox in ~30 seconds."
     except Exception as e:
@@ -283,7 +301,7 @@ async def submit_batch(batch_id: str = Form("BATCH-2026-05B")) -> RedirectRespon
         ttl_seconds=7 * 24 * 3600,
     )
 
-    card = build_manager_approval_request(
+    inline_card = build_manager_approval_request(
         company_name=company["name"],
         cycle_label=batch["cycle_label"],
         batch_id=batch_id,
@@ -297,15 +315,30 @@ async def submit_batch(batch_id: str = Form("BATCH-2026-05B")) -> RedirectRespon
         discuss_token=handoff_token,
     )
 
+    html_body, plain_text = render_manager_approval_email(
+        manager_name="David",
+        company_name=company["name"],
+        cycle_label=batch["cycle_label"],
+        batch_id=batch_id,
+        submitted_by="Maria Hernandez",
+        totals=batch["totals"],
+        exception_count=exception_count,
+        admin_notes=batch["admin_notes"],
+        handoff_token=handoff_token,
+        approve_token=approve_token,
+        reject_token=reject_token,
+        base_url=s.app_base_url,
+        inline_card=inline_card,
+    )
+
     try:
         await send_email(
             to=s.demo_user_email,
-            subject=f"[PayCycle] Approval needed · {batch_id} · ${batch['totals']['gross']:,.2f}",
-            card=card,
-            fallback_text=f"Payroll batch {batch_id} is ready for your approval.",
-            fallback_link=f"{s.app_base_url}/cta/handoff?token={handoff_token}&surface=teams",
+            subject=f"✅ Approval needed · {batch_id} · ${batch['totals']['gross']:,.2f}",
+            html_body=html_body,
+            plain_text=plain_text,
         )
-        flash = f"Approval email queued to {s.demo_user_email}. Click Approve or 'Get details in Teams' when it arrives."
+        flash = f"Approval email queued to {s.demo_user_email}. Click Approve or 'Review in Teams' when it arrives."
     except Exception as e:
         flash = f"Email send failed: {e}"
         logger.exception("approval email failed")
