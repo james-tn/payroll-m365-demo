@@ -71,6 +71,54 @@ async def health() -> dict:
 _OPENID_KEYS: dict[str, Any] = {"keys": None, "fetched_at": 0}
 _OIDC_CONFIG_URL = "https://login.botframework.com/v1/.well-known/openidconfiguration"
 
+# Push dedup: {jti -> first_push_unix_ts}. TTL matches the token TTL (24h).
+_PUSHED_JTIS: dict[str, float] = {}
+_PUSH_DEDUP_TTL_SECONDS = 86400
+
+# Prefetcher User-Agent signatures (Defender Safe Links, Outlook link preview, etc.).
+_PREFETCHER_UA_MARKERS = (
+    "BingPreview",
+    "MicrosoftPreview",
+    "Microsoft Office",
+    "Microsoft-WebDAV",
+    "OutlookConnector",
+    "SkypeUriPreview",
+    "TeamsLinkPreview",
+    "facebookexternalhit",
+    "Slackbot-LinkExpanding",
+    "Twitterbot",
+    "LinkedInBot",
+    "ms-office",
+    "Mozilla/4.0 (compatible; ms-office;",
+)
+
+
+def _looks_like_prefetcher(user_agent: str) -> bool:
+    if not user_agent:
+        # No UA at all → very likely an automated probe, not a human browser
+        return True
+    ua = user_agent.lower()
+    for marker in _PREFETCHER_UA_MARKERS:
+        if marker.lower() in ua:
+            return True
+    return False
+
+
+def _push_already_done(jti: str) -> bool:
+    """Return True if we've already pushed for this token id (within TTL)."""
+    now = time.time()
+    # Opportunistic GC of stale entries
+    if len(_PUSHED_JTIS) > 1000:
+        cutoff = now - _PUSH_DEDUP_TTL_SECONDS
+        for k in [k for k, v in _PUSHED_JTIS.items() if v < cutoff]:
+            _PUSHED_JTIS.pop(k, None)
+    ts = _PUSHED_JTIS.get(jti)
+    return bool(ts and (now - ts) < _PUSH_DEDUP_TTL_SECONDS)
+
+
+def _mark_push_done(jti: str) -> None:
+    _PUSHED_JTIS[jti] = time.time()
+
 
 async def _get_signing_keys() -> list[dict]:
     """Fetch and cache Bot Framework signing keys (refresh every 24h)."""
@@ -89,26 +137,36 @@ async def _validate_bot_jwt(auth_header: Optional[str]) -> dict:
     """Validate the inbound Bearer token from Bot Framework. Returns claims."""
     settings = get_settings()
     if not auth_header or not auth_header.lower().startswith("bearer "):
+        logger.warning("jwt: missing or malformed Authorization header (got=%r)", auth_header[:40] if auth_header else None)
         raise HTTPException(401, "missing bearer token")
     token = auth_header.split(" ", 1)[1]
     try:
         unverified = jwt.get_unverified_header(token)
+        unverified_claims = jwt.get_unverified_claims(token)
         kid = unverified.get("kid")
+        alg = unverified.get("alg", "RS256")
+        iss = unverified_claims.get("iss")
+        aud = unverified_claims.get("aud")
+        logger.info("jwt: header kid=%s alg=%s | claims iss=%s aud=%s expected_aud=%s",
+                    kid, alg, iss, aud, settings.bot_app_id)
         keys = await _get_signing_keys()
         key = next((k for k in keys if k.get("kid") == kid), None)
         if not key:
+            logger.warning("jwt: unknown signing key kid=%s (have %d keys from BF OIDC)", kid, len(keys))
             raise HTTPException(401, "unknown signing key")
-        # Accept any issuer (multi-tenant friendly). Audience must be our bot's app id.
         claims = jwt.decode(
             token,
             key,
-            algorithms=[unverified.get("alg", "RS256")],
+            algorithms=[alg],
             audience=settings.bot_app_id,
             options={"verify_iss": False},
         )
+        logger.info("jwt: validated ok, claims=%s", {k: claims.get(k) for k in ("iss", "aud", "appid", "serviceurl")})
         return claims
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning("jwt validation failed: %s", e)
+        logger.warning("jwt: validation failed: %s: %s", type(e).__name__, e)
         raise HTTPException(401, f"invalid token: {e}") from e
 
 
@@ -424,17 +482,41 @@ async def cta_handoff(request: Request) -> Response:
         primary_action_data=primary_data,
     )
 
-    # Attempt proactive push to the stored conversation
+    # Attempt proactive push to the stored conversation - but DEDUP first.
+    # The same handoff URL is GETted multiple times by Defender Safe Links scrubbers,
+    # Outlook link prefetch, and browser pre-render before the user actually clicks.
+    # Each token's jti is unique per email; push at most once per jti within the TTL.
     conv_store = get_conversation_store()
     stored = conv_store.get_by_user(user_email, persona)
     pushed = False
-    if stored and stored.conversation_reference:
+    already = False
+    jti = claims.get("jti", "")
+    user_agent = request.headers.get("user-agent", "")
+    is_prefetcher = _looks_like_prefetcher(user_agent)
+    if jti and _push_already_done(jti):
+        already = True
+        logger.info("handoff: skipping duplicate push jti=%s ua=%r", jti, user_agent[:80])
+    elif is_prefetcher:
+        logger.info("handoff: skipping push for prefetcher ua=%r", user_agent[:80])
+    elif stored and stored.conversation_reference:
         try:
             await push_card_to_stored(stored, card, text="Continuing from your email...")
             pushed = True
+            if jti:
+                _mark_push_done(jti)
         except Exception as e:
             logger.warning("proactive push failed: %s", e)
 
+    # Also set pending_context for the canonical demo emails (the JWT 'sub' may not
+    # exactly match what Teams sends us as the user identity).
+    for em in (settings.demo_admin_email, settings.demo_manager_email):
+        if em:
+            conv_store.set_pending_context(em, persona, {
+                "batch_id": batch_id,
+                "intent": intent,
+                "from_email_link": True,
+                "source_event": claims.get("event", ""),
+            })
     # Set pending context so the agent's first turn in this chat knows what we're discussing
     conv_store.set_pending_context(user_email, persona, {
         "batch_id": batch_id,
@@ -448,8 +530,13 @@ async def cta_handoff(request: Request) -> Response:
     if surface == "copilot":
         deep_link = "https://m365.cloud.microsoft/chat"
 
-    # If we couldn't push (no conversation ref yet), show an interstitial first
-    if not pushed:
+    # For prefetchers, return a minimal HTML body without redirect so we don't
+    # influence preview rendering. Defender/Outlook only need a 200.
+    if is_prefetcher:
+        return HTMLResponse("<!doctype html><title>PayCycle handoff</title>", status_code=200)
+
+    # If a real user click but no conv ref (or push failed and not already done), show interstitial.
+    if not pushed and not already:
         html = _simple_redirect_page(
             "Opening PayCycle in Teams...",
             f"It looks like you haven't talked with the PayCycle agent in {surface.title()} yet. "
