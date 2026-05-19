@@ -52,8 +52,14 @@ class ConversationStore:
                 )
             channel_id = activity.get("channelId", "")
             conv_id = (activity.get("conversation") or {}).get("id", "")
+            conv_type = (activity.get("conversation") or {}).get("conversationType", "")
             service_url = activity.get("serviceUrl", "")
             bot = activity.get("recipient") or {}
+            if conv_id:
+                import logging
+                logging.getLogger("payroll.demo").info(
+                    "  conv_id=%s type=%s service_url=%s", conv_id, conv_type, service_url,
+                )
         else:
             from_p = getattr(activity, "from_property", None) or getattr(activity, "from", None)
             user_id = getattr(from_p, "id", "") if from_p else ""
@@ -65,6 +71,7 @@ class ConversationStore:
             channel_id = getattr(activity, "channel_id", "") or ""
             conv = getattr(activity, "conversation", None)
             conv_id = getattr(conv, "id", "") if conv else ""
+            conv_type = getattr(conv, "conversation_type", "") if conv else ""
             service_url = getattr(activity, "service_url", "") or ""
             bot = getattr(activity, "recipient", None)
 
@@ -76,7 +83,7 @@ class ConversationStore:
             "bot": ({"id": bot.get("id"), "name": bot.get("name")} if isinstance(bot, dict) else (
                 {"id": getattr(bot, "id", ""), "name": getattr(bot, "name", "")} if bot else {}
             )),
-            "conversation": {"id": conv_id, "tenantId": tenant_id},
+            "conversation": {"id": conv_id, "tenantId": tenant_id, "conversationType": conv_type},
             "serviceUrl": service_url,
         }
 

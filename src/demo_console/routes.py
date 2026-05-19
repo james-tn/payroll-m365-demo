@@ -619,3 +619,32 @@ async def state() -> JSONResponse:
         "batches": {bid: store.get_batch(bid) for bid in ["BATCH-2026-05B"]},
         "audit": store.get_audit_log(),
     })
+
+
+@router.get("/conv-refs")
+async def conv_refs_dump() -> JSONResponse:
+    """Diagnostic: dump stored conversation references with redaction.
+
+    Lets us tell whether the captured ref is a personal 1:1 chat
+    (conversationType=personal) vs a team channel thread.
+    """
+    conv_store = get_conversation_store()
+    rows: list[dict] = []
+    with conv_store._lock:
+        for (email, persona), sc in conv_store._by_user_persona.items():
+            ref = sc.conversation_reference or {}
+            conv = ref.get("conversation") or {}
+            rows.append({
+                "key_email": email,
+                "key_persona": persona,
+                "user_email": sc.user_email,
+                "surface": sc.surface,
+                "channelId": ref.get("channelId"),
+                "conversation_id": conv.get("id"),
+                "conversation_type": conv.get("conversationType"),
+                "tenant_id": conv.get("tenantId"),
+                "service_url": ref.get("serviceUrl"),
+                "bot_id": (ref.get("bot") or {}).get("id"),
+                "pending_count": len(sc.pending_cards or []),
+            })
+    return JSONResponse({"count": len(rows), "rows": rows})
