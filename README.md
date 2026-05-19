@@ -107,12 +107,11 @@ flowchart LR
 
 ---
 
-## Try the live demo
+## Run the demo
 
-**Live URL:** <https://payroll-m365-demo.politeground-c0ea36c5.eastus2.azurecontainerapps.io>
-
-**Demo console:**
-<https://payroll-m365-demo.politeground-c0ea36c5.eastus2.azurecontainerapps.io/demo/console>
+Stand up the stack with [`infrastructure/provision.sh`](#provision-azure-from-scratch)
++ [`infrastructure/deploy.sh`](infrastructure/deploy.sh), or run it
+[locally](#local-dev). The operator controller lives at `/demo/console`.
 
 From the console, for each step pick `📧 Email`, `💬 Teams`, or `📧+💬 Both`
 as the delivery mode and watch the same notification arrive in the chosen
