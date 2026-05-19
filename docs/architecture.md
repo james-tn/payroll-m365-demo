@@ -222,7 +222,7 @@ they refer to.
 | `BOT_APP_ID` + bot token (UAMI in this deployment) | Authenticates the createConversation call. |
 | `DEMO_USER_AAD_OBJECT_ID` (env var) | Identifies the user in `members[].id`. Look up with `az ad user show --id <upn> --query id -o tsv`. |
 | `DEMO_USER_TENANT_ID` (env var) | Required by Teams to route to the user's tenant. |
-| `BOT_SERVICE_URL` (env var, defaults to `https://smba.trafficmanager.net/teams/`) | Where createConversation POSTs to. The default works for any tenant. |
+| `BOT_SERVICE_URL` (env var, defaults to `https://smba.trafficmanager.net/amer/`) | Regional Teams Bot Connector endpoint where createConversation POSTs. Valid regions: `/amer/`, `/emea/`, `/apac/`, `/ind/`. The code falls through all of them if the configured one returns 404. |
 | **Bot app installed in user's personal scope** | The user must have the PayCycle Teams app installed (via sideload or org catalog). Without this, createConversation returns 403. This is a **one-time** step per user, not a per-notification step. |
 
 Once a chat is created, the conv ref persists for the lifetime of the

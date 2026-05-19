@@ -181,8 +181,20 @@ async def create_personal_chat(
     if not tenant_id:
         raise RuntimeError("tenant_id is required")
 
-    base = (service_url or s.bot_service_url or "https://smba.trafficmanager.net/teams/").rstrip("/")
-    url = f"{base}/v3/conversations"
+    base_override = (service_url or s.bot_service_url or "").rstrip("/")
+    # Teams Bot Connector is regional. /teams/ doesn't exist (returns 404
+    # ServiceError); the valid roots are /amer/, /emea/, /apac/, /ind/, etc.
+    # Try the explicit override first, then fall through the known regions.
+    candidates: list[str] = []
+    if base_override and not base_override.endswith("/teams"):
+        candidates.append(base_override)
+    candidates.extend([
+        "https://smba.trafficmanager.net/amer",
+        "https://smba.trafficmanager.net/emea",
+        "https://smba.trafficmanager.net/apac",
+        "https://smba.trafficmanager.net/ind",
+    ])
+
     body = {
         "bot": {"id": f"28:{s.bot_app_id}"},
         "isGroup": False,
@@ -191,10 +203,21 @@ async def create_personal_chat(
     }
 
     token = await _get_app_token()
+    last_err = ""
+    base_used = ""
+    result: Optional[dict] = None
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, json=body, headers={"Authorization": f"Bearer {token}"})
-        if r.status_code >= 300:
+        for cand in candidates:
+            url = f"{cand}/v3/conversations"
+            r = await client.post(url, json=body, headers={"Authorization": f"Bearer {token}"})
+            if r.status_code < 300:
+                result = r.json()
+                base_used = cand
+                logger.info("createConversation succeeded at region=%s", cand)
+                break
             excerpt = (r.text or "")[:400]
+            last_err = f"{r.status_code} at {cand}: {excerpt}"
+            logger.warning("createConversation failed: %s", last_err)
             if r.status_code == 403:
                 raise RuntimeError(
                     f"createConversation 403 - the bot's Teams app is not installed in "
@@ -202,10 +225,16 @@ async def create_personal_chat(
                     f"{user_display_name} once (Apps → search PayCycle → Add), then retry. "
                     f"({excerpt})"
                 )
-            raise RuntimeError(
-                f"createConversation {r.status_code}: {excerpt}"
-            )
-        result = r.json()
+            # 404 ServiceError, 400, etc → try next region
+
+    if result is None:
+        raise RuntimeError(
+            f"createConversation failed across all regions. Last error: {last_err}. "
+            f"Common causes: (a) the bot's Teams app is not installed in this user's "
+            f"personal scope; (b) the AAD object id is for the wrong tenant; "
+            f"(c) the user has never used Teams. Workaround: have the user open Teams "
+            f"once (no need to message the bot) and try again."
+        )
 
     conv_id = result.get("id")
     if not conv_id:
@@ -222,7 +251,7 @@ async def create_personal_chat(
                  "aadObjectId": user_aad_object_id},
         "bot": {"id": f"28:{s.bot_app_id}", "name": "PayCycle"},
         "conversation": {"id": conv_id, "tenantId": tenant_id},
-        "serviceUrl": base + "/",
+        "serviceUrl": base_used + "/",
     }
 
 

@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     # Bot Framework Connector service URL — used for proactive createConversation
     # when no ConversationReference is already stored. Default works for any tenant.
-    bot_service_url: str = "https://smba.trafficmanager.net/teams/"
+    bot_service_url: str = "https://smba.trafficmanager.net/amer/"
 
     # Actionable email
     oam_originator_id: str = ""
