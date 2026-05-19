@@ -1,13 +1,19 @@
 """Demo console - lightweight web UI for triggering scenarios during a live demo."""
 from __future__ import annotations
+import asyncio
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from ..bot.conversation_store import get_conversation_store
+from ..bot.proactive import push_card_to_stored
 from ..cards.builders import (
     build_admin_exception_notification,
+    build_exception_worklist_card,
     build_manager_approval_request,
+    build_teams_continuation_card,
 )
 from ..common.config import get_settings
 from ..common.logging import get_logger
@@ -49,7 +55,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     .meta {{ color: #888; font-size: 12px; }}
     form {{ display: inline; }}
     .pill {{ display: inline-block; background: #eef; padding: 2px 8px; border-radius: 10px; font-size: 11px; color: #2667ff; }}
-    .flash {{ background: #dff6dd; color: #107c10; padding: 10px 16px; border-radius: 6px; margin: 8px 0; }}
+    .flash {{ background: #dff6dd; color: #107c10; padding: 10px 16px; border-radius: 6px; margin: 8px 0; white-space: pre-wrap; }}
+    .delivery-mode {{ display: inline-flex; gap: 14px; margin: 8px 0 12px; padding: 8px 12px; background: #eef3ff; border-radius: 6px; font-size: 13px; }}
+    .delivery-mode label {{ cursor: pointer; }}
+    .delivery-mode input {{ vertical-align: middle; margin-right: 4px; }}
   </style>
 </head>
 <body>
@@ -66,6 +75,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <tr><td>Demo user (both personas)</td><td>{demo_email}</td></tr>
     <tr><td>Email sender</td><td>{sender}</td></tr>
     <tr><td>OAM originator registered</td><td>{oam_status}</td></tr>
+    <tr><td>Teams conv ref (admin persona)</td><td>{teams_admin_status}</td></tr>
+    <tr><td>Teams conv ref (manager persona)</td><td>{teams_manager_status}</td></tr>
   </table>
 
   <h2>Payroll batch state</h2>
@@ -83,29 +94,44 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <h2>Demo steps</h2>
 
   <div class="step">
-    <h3>Step 1 - Send exception alert email to Payroll Admin</h3>
-    <p>Sends an Outlook actionable email to <b>{demo_email}</b> playing the <span class="pill">payroll_admin</span> persona (Maria).
-    The email contains the open exceptions and a button to continue review in Teams.</p>
+    <h3>Step 1 - Notify Payroll Admin of open exceptions</h3>
+    <p>Plays the <span class="pill">payroll_admin</span> persona (Maria) being notified that {open_count}
+    exception{open_plural} need review for cycle <b>{cycle_label}</b>.</p>
     <form method="post" action="/demo/send-admin-alert">
-      <button type="submit">Send admin alert email</button>
+      <div class="delivery-mode">
+        <span><b>Deliver via:</b></span>
+        <label><input type="radio" name="delivery_mode" value="email" checked>📧 Email (ACS → Outlook)</label>
+        <label><input type="radio" name="delivery_mode" value="teams">💬 Teams (proactive)</label>
+        <label><input type="radio" name="delivery_mode" value="both">📧+💬 Both</label>
+      </div>
+      <br>
+      <button type="submit">Send admin notification</button>
     </form>
   </div>
 
   <div class="step">
     <h3>Step 2 - Admin submits batch for approval</h3>
-    <p>Simulates Maria resolving the exceptions and submitting the batch to the Payroll Manager (David).
-    This sends a second actionable email containing the approval request card.</p>
+    <p>Simulates Maria resolving exceptions and submitting batch <b>BATCH-2026-05B</b>. Sends an approval
+    request to the Payroll Manager (David) via the chosen channel.</p>
     <form method="post" action="/demo/submit-batch">
       <input type="hidden" name="batch_id" value="BATCH-2026-05B">
-      <button type="submit">Submit batch & email approver</button>
+      <div class="delivery-mode">
+        <span><b>Deliver via:</b></span>
+        <label><input type="radio" name="delivery_mode" value="email" checked>📧 Email (ACS → Outlook)</label>
+        <label><input type="radio" name="delivery_mode" value="teams">💬 Teams (proactive)</label>
+        <label><input type="radio" name="delivery_mode" value="both">📧+💬 Both</label>
+      </div>
+      <br>
+      <button type="submit">Submit batch &amp; notify approver</button>
     </form>
   </div>
 
   <div class="step">
-    <h3>Step 3 - (in your inbox) Approve directly OR click 'Get details in Teams'</h3>
-    <p>You now play David. In Outlook, you can either approve in-email (happy path) or click
-    'Get details in Teams' to be handed off into a Teams chat with the agent that has full
-    context loaded.</p>
+    <h3>Step 3 - (in your inbox / Teams chat) Take action</h3>
+    <p>If you chose email: inline Approve / Flag buttons fire silently in Outlook for clients that support
+    actionable messages; the "Review with PayCycle Assistant" button always works for handoff.<br>
+    If you chose Teams: the worklist card lands directly in your bot chat with Action.Execute buttons.
+    No client setup required.</p>
   </div>
 
   <div class="step">
@@ -124,6 +150,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+
+def _conv_ref_status(persona: str) -> str:
+    s = get_settings()
+    conv_store = get_conversation_store()
+    for em in (s.demo_user_email, s.demo_admin_email, s.demo_manager_email):
+        if not em:
+            continue
+        stored = conv_store.get_by_user(em, persona)
+        if stored and stored.conversation_reference.get("conversation", {}).get("id"):
+            return f"✅ {stored.surface} ({em})"
+    return "❌ none (say hi to the bot first for proactive delivery)"
 
 
 def _render(flash: str = "") -> str:
@@ -145,8 +183,9 @@ def _render(flash: str = "") -> str:
             f"<td>{b.get('approved_by') or b.get('rejected_by') or '—'}</td></tr>"
         )
 
+    open_exceptions = store.list_open_exceptions()
     exception_rows = []
-    for e in store.list_open_exceptions():
+    for e in open_exceptions:
         exception_rows.append(
             f"<tr><td>{e['id']}</td>"
             f"<td>{e['employee_name']}</td>"
@@ -175,6 +214,10 @@ def _render(flash: str = "") -> str:
         demo_email=s.demo_user_email,
         sender=s.acs_sender_address or "(not configured)",
         oam_status="✅ yes" if s.oam_originator_id else "❌ no (action buttons disabled in Outlook)",
+        teams_admin_status=_conv_ref_status("payroll_admin"),
+        teams_manager_status=_conv_ref_status("payroll_manager"),
+        open_count=len(open_exceptions),
+        open_plural="s" if len(open_exceptions) != 1 else "",
         batch_rows="".join(batch_rows) or "<tr><td colspan='4' class='meta'>No batches.</td></tr>",
         exception_rows="".join(exception_rows),
         audit_rows="".join(audit_rows),
@@ -188,16 +231,17 @@ async def console(request: Request) -> HTMLResponse:
     return HTMLResponse(_render(flash))
 
 
-@router.post("/send-admin-alert")
-async def send_admin_alert() -> RedirectResponse:
+# ---- Artifact builders (shared between delivery channels) ----
+
+
+def _build_admin_artifacts() -> dict[str, Any]:
     s = get_settings()
     store = get_store()
     company = store.get_company()
     cycle = store.get_current_cycle()
     exceptions = store.list_open_exceptions()
-
     if not exceptions:
-        return RedirectResponse("/demo/console?flash=No+open+exceptions+to+send.", status_code=303)
+        return {"empty": True}
 
     handoff_token = mint(
         purpose="handoff",
@@ -212,7 +256,6 @@ async def send_admin_alert() -> RedirectResponse:
         ttl_seconds=86400,
     )
 
-    # Build the OAM card for inline rendering inside Outlook (when supported).
     inline_card = build_admin_exception_notification(
         company_name=company["name"],
         cycle_label=cycle["label"],
@@ -235,24 +278,25 @@ async def send_admin_alert() -> RedirectResponse:
         inline_card=inline_card,
     )
 
-    try:
-        await send_email(
-            to=s.demo_user_email,
-            subject=f"🔔 {len(exceptions)} payroll exception{'s' if len(exceptions) != 1 else ''} need review · {cycle['label']}",
-            html_body=html_body,
-            plain_text=plain_text,
-        )
-        flash = f"Admin alert email queued to {s.demo_user_email}. Check the inbox in ~30 seconds."
-    except Exception as e:
-        flash = f"Email send failed: {e}"
-        logger.exception("admin alert email failed")
-    return RedirectResponse(f"/demo/console?flash={flash}", status_code=303)
+    return {
+        "empty": False,
+        "subject": f"🔔 {len(exceptions)} payroll exception{'s' if len(exceptions) != 1 else ''} need review · {cycle['label']}",
+        "html_body": html_body,
+        "plain_text": plain_text,
+        "inline_card": inline_card,
+        "handoff_token": handoff_token,
+        "exception_ids": [e["id"] for e in exceptions],
+        "batch_id": "BATCH-2026-05B",
+        "exceptions": exceptions,
+        "company": company,
+        "cycle": cycle,
+    }
 
 
-@router.post("/submit-batch")
-async def submit_batch(batch_id: str = Form("BATCH-2026-05B")) -> RedirectResponse:
+def _build_manager_artifacts(batch_id: str) -> dict[str, Any]:
     s = get_settings()
     store = get_store()
+    company = store.get_company()
 
     # Simulate Maria having resolved the exceptions
     for exc in store.list_open_exceptions():
@@ -262,19 +306,14 @@ async def submit_batch(batch_id: str = Form("BATCH-2026-05B")) -> RedirectRespon
             notes=f"Reviewed and approved by admin on {datetime.utcnow().isoformat()}Z",
         )
 
-    try:
-        batch = store.submit_batch(
-            batch_id,
-            submitted_by="Maria Hernandez (Payroll Admin)",
-            admin_notes=(
-                "Joseph Smith's 14h overtime is legitimate - confirmed assignment to Project Atlas tooling rebuild. "
-                "Sarah Lee's PTO of 6h approved verbally by Daniel Cruz this morning; PTO-9821 will be updated in Flex by EOD."
-            ),
-        )
-    except (KeyError, ValueError) as e:
-        return RedirectResponse(f"/demo/console?flash=Submit+failed:+{e}", status_code=303)
-
-    company = store.get_company()
+    batch = store.submit_batch(
+        batch_id,
+        submitted_by="Maria Hernandez (Payroll Admin)",
+        admin_notes=(
+            "Joseph Smith's 14h overtime is legitimate - confirmed assignment to Project Atlas tooling rebuild. "
+            "Sarah Lee's PTO of 6h approved verbally by Daniel Cruz this morning; PTO-9821 will be updated in Flex by EOD."
+        ),
+    )
     exception_count = len(store.list_exceptions_for_batch(batch_id))
 
     approve_token = mint(
@@ -331,17 +370,193 @@ async def submit_batch(batch_id: str = Form("BATCH-2026-05B")) -> RedirectRespon
         inline_card=inline_card,
     )
 
+    return {
+        "subject": f"✅ Approval needed · {batch_id} · ${batch['totals']['gross']:,.2f}",
+        "html_body": html_body,
+        "plain_text": plain_text,
+        "inline_card": inline_card,
+        "handoff_token": handoff_token,
+        "batch_id": batch_id,
+        "batch": batch,
+        "company": company,
+        "exception_count": exception_count,
+    }
+
+
+# ---- Channel dispatchers ----
+
+
+def _parse_channels(delivery_mode: str) -> set[str]:
+    mode = (delivery_mode or "email").lower().strip()
+    if mode == "both":
+        return {"email", "teams"}
+    if mode in ("email", "teams"):
+        return {mode}
+    return {"email"}
+
+
+async def _deliver_via_email(*, to: str, subject: str, html_body: str, plain_text: str) -> str:
     try:
-        await send_email(
-            to=s.demo_user_email,
-            subject=f"✅ Approval needed · {batch_id} · ${batch['totals']['gross']:,.2f}",
-            html_body=html_body,
-            plain_text=plain_text,
-        )
-        flash = f"Approval email queued to {s.demo_user_email}. Click Approve or 'Review in Teams' when it arrives."
+        op_id = await send_email(to=to, subject=subject, html_body=html_body, plain_text=plain_text)
+        return f"📧 Email queued to {to} (op={str(op_id)[-12:]})"
     except Exception as e:
-        flash = f"Email send failed: {e}"
-        logger.exception("approval email failed")
+        logger.exception("email send failed")
+        return f"📧 ❌ Email failed: {type(e).__name__}: {e}"
+
+
+async def _deliver_admin_via_teams(artifacts: dict) -> str:
+    """Push the admin worklist card directly into the Teams bot chat (no email)."""
+    s = get_settings()
+    conv_store = get_conversation_store()
+    persona = "payroll_admin"
+    stored = None
+    for em in (s.demo_user_email, s.demo_admin_email):
+        if not em:
+            continue
+        stored = conv_store.get_by_user(em, persona)
+        if stored and stored.conversation_reference.get("conversation", {}).get("id"):
+            break
+        stored = None
+    if not stored:
+        return ("💬 ❌ Teams: no conversation reference for the admin persona yet. "
+                "Open the PayCycle bot in Teams and send one message ('hi'), then retry.")
+
+    teams_card = build_exception_worklist_card(
+        event_id=artifacts["handoff_token"][-12:],
+        batch_id=artifacts["batch_id"],
+        company_name=artifacts["company"]["name"],
+        cycle_label=artifacts["cycle"]["label"],
+        deadline_iso=artifacts["cycle"]["deadline"],
+        exceptions=artifacts["exceptions"],
+        totals={
+            "employees": artifacts["cycle"].get("employees_included", 0),
+            "gross": artifacts["cycle"].get("estimated_gross", 0),
+            "net": artifacts["cycle"].get("estimated_net", 0),
+        },
+        persona=persona,
+        user_email=stored.user_email,
+    )
+
+    try:
+        await push_card_to_stored(
+            stored, teams_card,
+            text=(f"🔔 PayCycle: **{len(artifacts['exceptions'])} payroll exceptions** need review "
+                  f"for cycle **{artifacts['cycle']['label']}**."),
+        )
+        return f"💬 Teams card pushed to {stored.user_email} ({stored.surface})"
+    except Exception as e:
+        logger.exception("proactive admin push failed")
+        return f"💬 ❌ Teams push failed: {type(e).__name__}: {e}"
+
+
+async def _deliver_manager_via_teams(artifacts: dict) -> str:
+    """Push the manager approval context card directly into Teams (no email)."""
+    s = get_settings()
+    conv_store = get_conversation_store()
+    persona = "payroll_manager"
+    stored = None
+    for em in (s.demo_user_email, s.demo_manager_email):
+        if not em:
+            continue
+        stored = conv_store.get_by_user(em, persona)
+        if stored and stored.conversation_reference.get("conversation", {}).get("id"):
+            break
+        stored = None
+    if not stored:
+        return ("💬 ❌ Teams: no conversation reference for the manager persona yet. "
+                "Open the PayCycle bot in Teams and send one message ('hi'), then retry.")
+
+    batch = artifacts["batch"]
+    facts = [
+        {"title": "Batch", "value": batch["id"]},
+        {"title": "Cycle", "value": batch["cycle_label"]},
+        {"title": "Status", "value": batch["status"].title()},
+        {"title": "Employees", "value": f"{batch['totals']['employees']:,}"},
+        {"title": "Gross", "value": f"${batch['totals']['gross']:,.2f}"},
+        {"title": "Exceptions resolved", "value": str(artifacts["exception_count"])},
+    ]
+    teams_card = build_teams_continuation_card(
+        title=f"Approval needed · {batch['cycle_label']}",
+        summary=("Maria submitted this batch and is asking for your approval. I have the full "
+                 "context — totals, exception resolutions, audit trail. Ask me anything or approve below."),
+        facts=facts,
+        base_url=s.app_base_url,
+        primary_action_label="✅ Approve this batch",
+        primary_action_data={
+            "verb": "approve_batch",
+            "batch_id": batch["id"],
+            "approver": stored.user_email,
+            "event_id": artifacts["handoff_token"][-12:],
+        },
+    )
+
+    try:
+        await push_card_to_stored(
+            stored, teams_card,
+            text=f"✅ PayCycle: batch **{batch['id']}** is submitted and needs your approval.",
+        )
+        return f"💬 Teams card pushed to {stored.user_email} ({stored.surface})"
+    except Exception as e:
+        logger.exception("proactive manager push failed")
+        return f"💬 ❌ Teams push failed: {type(e).__name__}: {e}"
+
+
+# ---- POST handlers ----
+
+
+@router.post("/send-admin-alert")
+async def send_admin_alert(delivery_mode: str = Form("email")) -> RedirectResponse:
+    s = get_settings()
+    artifacts = _build_admin_artifacts()
+    if artifacts.get("empty"):
+        return RedirectResponse("/demo/console?flash=No+open+exceptions+to+send.", status_code=303)
+
+    channels = _parse_channels(delivery_mode)
+    results: list[str] = []
+    tasks = []
+    if "email" in channels:
+        tasks.append(_deliver_via_email(
+            to=s.demo_user_email,
+            subject=artifacts["subject"],
+            html_body=artifacts["html_body"],
+            plain_text=artifacts["plain_text"],
+        ))
+    if "teams" in channels:
+        tasks.append(_deliver_admin_via_teams(artifacts))
+    for r in await asyncio.gather(*tasks, return_exceptions=False):
+        results.append(r)
+
+    flash = "Admin notification → " + "  |  ".join(results)
+    return RedirectResponse(f"/demo/console?flash={flash}", status_code=303)
+
+
+@router.post("/submit-batch")
+async def submit_batch(
+    batch_id: str = Form("BATCH-2026-05B"),
+    delivery_mode: str = Form("email"),
+) -> RedirectResponse:
+    s = get_settings()
+    try:
+        artifacts = _build_manager_artifacts(batch_id)
+    except (KeyError, ValueError) as e:
+        return RedirectResponse(f"/demo/console?flash=Submit+failed:+{e}", status_code=303)
+
+    channels = _parse_channels(delivery_mode)
+    results: list[str] = []
+    tasks = []
+    if "email" in channels:
+        tasks.append(_deliver_via_email(
+            to=s.demo_user_email,
+            subject=artifacts["subject"],
+            html_body=artifacts["html_body"],
+            plain_text=artifacts["plain_text"],
+        ))
+    if "teams" in channels:
+        tasks.append(_deliver_manager_via_teams(artifacts))
+    for r in await asyncio.gather(*tasks, return_exceptions=False):
+        results.append(r)
+
+    flash = "Manager approval → " + "  |  ".join(results)
     return RedirectResponse(f"/demo/console?flash={flash}", status_code=303)
 
 

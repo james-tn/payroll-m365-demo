@@ -253,24 +253,50 @@ async def _handle_message(activity: dict) -> Response:
     # an email handoff sent under a different persona key can find this chat.
     store.alias_to_emails(stored, [settings.demo_admin_email, settings.demo_manager_email])
 
-    # If user has a pending context from email CTA, fold it in as extra_context for one turn.
-    pending = store.consume_pending_context(stored.user_email, persona)
-    if pending is None:
-        # Also check the canonical demo email keys
-        for em in (settings.demo_admin_email, settings.demo_manager_email):
-            if em:
-                pending = store.consume_pending_context(em, persona) or pending
+    # Drain ALL pending cards across canonical email keys for this persona.
+    # Each entry corresponds to ONE email/notification the user clicked while
+    # the bot had no live conv ref; we replay them all in order so multiple
+    # concurrent notifications stay isolated and none is lost.
+    pending_payloads: list[dict] = []
+    seen_dedup: set[str] = set()
+    candidate_emails = [stored.user_email, settings.demo_admin_email, settings.demo_manager_email]
+    for em in candidate_emails:
+        if not em:
+            continue
+        for entry in store.drain_pending_cards(em, persona):
+            dk = entry.get("dedup_key") or entry.get("event_id")
+            if dk and dk in seen_dedup:
+                continue
+            if dk:
+                seen_dedup.add(dk)
+            pending_payloads.append(entry)
 
-    # If pending context carries a deferred card (because the email click happened
-    # before we had a conv ref), send the card NOW and prepend a short intro - skip
-    # the LLM round-trip for this turn.
-    pending_card = (pending or {}).get("pending_card") if pending else None
-    if pending_card:
-        intro = (pending or {}).get("pending_card_text") or "📨 Continuing from your email:"
-        logger.info("handoff: replaying deferred card from pending_context for user=%s persona=%s event=%s",
-                    stored.user_email, persona, ((pending or {}).get("event_id") or "")[:8])
-        await _reply_to_activity(activity, [pending_card], intro)
-        return JSONResponse({"status": "ok"}, status_code=200)
+    if pending_payloads:
+        logger.info("handoff: replaying %d deferred card(s) from pending queue user=%s persona=%s",
+                    len(pending_payloads), stored.user_email, persona)
+        if len(pending_payloads) == 1:
+            entry = pending_payloads[0]
+            card = entry.get("pending_card")
+            intro = entry.get("pending_card_text") or "📨 Continuing from your email:"
+            if card:
+                await _reply_to_activity(activity, [card], intro)
+                return JSONResponse({"status": "ok"}, status_code=200)
+        else:
+            # Multi-card replay — lead-in summarises, then push each card individually
+            await _reply_to_activity(
+                activity,
+                [],
+                f"📨 You have **{len(pending_payloads)} pending notifications** from email — replaying each one below.",
+            )
+            for entry in pending_payloads:
+                card = entry.get("pending_card")
+                if card:
+                    await _reply_to_activity(
+                        activity,
+                        [card],
+                        entry.get("pending_card_text") or "—",
+                    )
+            return JSONResponse({"status": "ok"}, status_code=200)
 
     conv_id = (activity.get("conversation") or {}).get("id", "session")
     user_text = activity.get("text") or "Hello"
@@ -280,7 +306,7 @@ async def _handle_message(activity: dict) -> Response:
             user_message=user_text,
             session_id=conv_id,
             persona=persona,
-            extra_context=pending,
+            extra_context=None,
         )
     except Exception as e:
         logger.exception("agent failure: %s", e)
@@ -803,11 +829,11 @@ async def cta_handoff(request: Request) -> Response:
             user_email, persona,
         )
 
-    # Stash the FULL card + intent in pending_context so even if proactive push
-    # failed (or there's no conv ref yet), the user's first message in Teams
-    # will trigger the same worklist card to be sent. We index this under both
-    # the JWT sub AND the canonical demo emails since the Teams user identity
-    # may not exactly match the JWT sub claim.
+    # Stash the FULL card + intent in a per-jti queue entry so even if the
+    # proactive push failed (or there's no conv ref yet), the user's first
+    # message in Teams will trigger this card. Keyed by jti so concurrent
+    # emails do NOT overwrite each other — each unread email's card stays
+    # in the queue and gets replayed.
     pending_payload = {
         "batch_id": batch_id,
         "intent": intent,
@@ -819,7 +845,7 @@ async def cta_handoff(request: Request) -> Response:
     }
     for em in (user_email, settings.demo_admin_email, settings.demo_manager_email):
         if em:
-            conv_store.set_pending_context(em, persona, pending_payload)
+            conv_store.push_pending_card(em, persona, pending_payload, dedup_key=jti or event_id)
 
     # Redirect to the Teams deep link
     deep_link = f"https://teams.microsoft.com/l/chat/0/0?users=28:{settings.bot_app_id}"

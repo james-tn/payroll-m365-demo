@@ -3,7 +3,9 @@
 Holds:
   - conversation references (for proactive replay)
   - user-persona mapping
-  - in-flight 'pending handoff' contexts (set when a CTA link mints a token; consumed by bot's first message)
+  - in-flight 'pending handoff' contexts (queue of cards waiting to be delivered
+    on the user's next bot message — one queued entry per email/notification so
+    multiple concurrent emails do not overwrite each other)
 
 In-memory for the demo. Production = Cosmos / Redis.
 """
@@ -20,7 +22,11 @@ class StoredConversation:
     persona: str  # "payroll_admin" or "payroll_manager"
     surface: str  # "teams" or "copilot"
     conversation_reference: dict = field(default_factory=dict)
-    pending_context: Optional[dict] = None  # e.g. {"batch_id": "...", "intent": "discuss"}
+    pending_cards: list[dict] = field(default_factory=list)
+
+    @property
+    def pending_context(self) -> Optional[dict]:
+        return self.pending_cards[-1] if self.pending_cards else None
 
 
 class ConversationStore:
@@ -77,9 +83,9 @@ class ConversationStore:
             )
             key = (sc.user_email.lower(), sc.persona)
             existing = self._by_user_persona.get(key)
-            # Preserve any pending_context from a prior upsert
-            if existing and existing.pending_context:
-                sc.pending_context = existing.pending_context
+            # Preserve any queued pending cards from a prior upsert
+            if existing and existing.pending_cards:
+                sc.pending_cards = existing.pending_cards
             self._by_user_persona[key] = sc
             if conv_id:
                 self._by_conv_id[conv_id] = sc
@@ -100,13 +106,14 @@ class ConversationStore:
                 if not em:
                     continue
                 key = (em.lower(), sc.persona)
+                existing = self._by_user_persona.get(key)
                 alias = StoredConversation(
                     user_email=em,
                     user_tenant_id=sc.user_tenant_id,
                     persona=sc.persona,
                     surface=sc.surface,
                     conversation_reference=sc.conversation_reference,
-                    pending_context=self._by_user_persona.get(key, sc).pending_context if self._by_user_persona.get(key) else None,
+                    pending_cards=existing.pending_cards if existing else [],
                 )
                 self._by_user_persona[key] = alias
 
@@ -118,9 +125,24 @@ class ConversationStore:
         with self._lock:
             return self._by_conv_id.get(conversation_id)
 
-    def set_pending_context(self, email: str, persona: str, ctx: dict) -> None:
+    def push_pending_card(
+        self,
+        email: str,
+        persona: str,
+        payload: dict,
+        *,
+        dedup_key: Optional[str] = None,
+    ) -> bool:
+        """Append a pending card payload to the user's queue.
+
+        Returns True if appended, False if a payload with the same dedup_key
+        is already queued (typically the jti / event_id of the originating email
+        handoff click — so Defender Safe Links / Outlook prefetch hitting the
+        handoff URL multiple times doesn't queue the same card N times).
+        """
         with self._lock:
-            sc = self._by_user_persona.get((email.lower(), persona))
+            key = (email.lower(), persona)
+            sc = self._by_user_persona.get(key)
             if sc is None:
                 sc = StoredConversation(
                     user_email=email,
@@ -128,17 +150,37 @@ class ConversationStore:
                     persona=persona,
                     surface="unknown",
                 )
-                self._by_user_persona[(email.lower(), persona)] = sc
-            sc.pending_context = ctx
+                self._by_user_persona[key] = sc
+            if dedup_key:
+                for existing in sc.pending_cards:
+                    if existing.get("dedup_key") == dedup_key:
+                        return False
+                payload = {**payload, "dedup_key": dedup_key}
+            sc.pending_cards.append(payload)
+            return True
 
-    def consume_pending_context(self, email: str, persona: str) -> Optional[dict]:
+    def drain_pending_cards(self, email: str, persona: str) -> list[dict]:
+        """Return ALL queued payloads for (email, persona) and clear the queue."""
         with self._lock:
             sc = self._by_user_persona.get((email.lower(), persona))
-            if not sc:
-                return None
-            ctx = sc.pending_context
-            sc.pending_context = None
-            return ctx
+            if not sc or not sc.pending_cards:
+                return []
+            drained = list(sc.pending_cards)
+            sc.pending_cards = []
+            return drained
+
+    # ---- Compat shims for older single-slot callers ----
+
+    def set_pending_context(self, email: str, persona: str, ctx: dict) -> None:
+        """Compat: append to the queue. Use push_pending_card with a dedup_key
+        for new code so multiple notifications don't collide."""
+        self.push_pending_card(email, persona, ctx, dedup_key=ctx.get("event_id"))
+
+    def consume_pending_context(self, email: str, persona: str) -> Optional[dict]:
+        """Compat: drain queue and return the most recent entry (last-write-wins).
+        New callers should use drain_pending_cards to get the full list."""
+        drained = self.drain_pending_cards(email, persona)
+        return drained[-1] if drained else None
 
 
 _store: Optional[ConversationStore] = None
