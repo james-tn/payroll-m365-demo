@@ -305,6 +305,7 @@ def build_exception_worklist_card(
             "isSubtle": True, "wrap": True, "spacing": "Small",
         })
 
+    snapshot_ids = [e["id"] for e in exceptions]
     for exc in exceptions:
         is_open = exc.get("status") == "open"
         ctx = {
@@ -313,6 +314,8 @@ def build_exception_worklist_card(
             "exception_id": exc["id"],
             "employee_id": exc["employee_id"],
             "persona": persona,
+            "snapshot_ids": snapshot_ids,
+            "user_email": user_email,
         }
         row_items: list[dict] = [
             {
@@ -342,6 +345,12 @@ def build_exception_worklist_card(
         ]
 
         if is_open:
+            if exc.get("flagged_for_hr"):
+                row_items.append({
+                    "type": "TextBlock",
+                    "text": f"🚩 Flagged for HR by {exc.get('flagged_by', 'admin')} — awaiting review",
+                    "color": "warning", "size": "Small", "spacing": "Small", "wrap": True,
+                })
             row_items.append({
                 "type": "ActionSet",
                 "spacing": "Small",

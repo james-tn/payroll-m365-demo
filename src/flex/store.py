@@ -150,6 +150,18 @@ class FlexStore:
                 return deepcopy(e)
         raise KeyError(exception_id)
 
+    def flag_exception(self, exception_id: str, flagger: str, notes: str = "") -> dict:
+        """Mark an exception as flagged for HR review (stays open / actionable)."""
+        for e in self._exceptions:
+            if e["id"] == exception_id:
+                e["flagged_for_hr"] = True
+                e["flagged_at"] = datetime.now(timezone.utc).isoformat()
+                e["flagged_by"] = flagger
+                e["flag_notes"] = notes
+                self._audit_event("exception_flagged", {"exception_id": exception_id, "by": flagger, "notes": notes})
+                return deepcopy(e)
+        raise KeyError(exception_id)
+
     def submit_batch(self, batch_id: str, submitted_by: str, admin_notes: str = "") -> dict:
         batch = self._batches.get(batch_id)
         if not batch:

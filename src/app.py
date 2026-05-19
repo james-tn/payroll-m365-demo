@@ -343,17 +343,16 @@ async def _handle_invoke(activity: dict) -> Response:
     if verb == "approve_exception":
         exc_id = action_data.get("exception_id", "")
         try:
-            exc = store.resolve_exception(
+            store.resolve_exception(
                 exc_id,
                 resolver=f"{actor} (Payroll Admin)",
                 notes=f"Approved via Teams card · event {event_id[:8]}",
             )
-            card = build_action_confirmation(
-                title=f"✅ {exc['employee_name']} approved",
-                message=f"{exc['title']} ({exc['id']}) resolved.",
-                sub=f"+{_format_money(exc['amount_impact'])} included in batch.",
+            # Rebuild the FULL worklist so other rows + batch-level actions
+            # remain interactive; only the approved row flips to resolved state.
+            return _invoke_card_response(
+                _rebuild_worklist_card(action_data, store)
             )
-            return _invoke_card_response(card)
         except KeyError:
             return _invoke_card_response(build_action_confirmation(
                 title="Exception not found", message=f"Could not find {exc_id}", style="error"))
@@ -365,14 +364,13 @@ async def _handle_invoke(activity: dict) -> Response:
             return _invoke_card_response(build_action_confirmation(
                 title="Exception not found", message=f"Could not find {exc_id}", style="error"))
         # Don't resolve - just record the audit and tell the user we'll route it.
+        store.flag_exception(exc_id, flagger=actor, notes=f"Flagged for HR via Teams · event {event_id[:8]}")
         logger.info("exception flagged for HR: %s by %s", exc_id, actor)
-        card = build_action_confirmation(
-            title=f"🚩 Flagged for HR",
-            message=f"{exc['employee_name']} · {exc['title']} routed to HR review.",
-            sub="Exception remains open until HR resolution.",
-            style="warning",
+        # Rebuild the worklist - the flagged row now shows a 🚩 badge but stays
+        # actionable so the admin can still Approve / Explain it.
+        return _invoke_card_response(
+            _rebuild_worklist_card(action_data, store)
         )
-        return _invoke_card_response(card)
 
     if verb == "explain_exception":
         exc_id = action_data.get("exception_id", "")
@@ -459,6 +457,37 @@ def _invoke_card_response(card: dict) -> JSONResponse:
         "type": "application/vnd.microsoft.card.adaptive",
         "value": card,
     })
+
+
+def _rebuild_worklist_card(action_data: dict, store: Any) -> dict:
+    """Rebuild the exception worklist card from snapshot ids in action data.
+
+    Called after Approve / Flag actions so the user gets the full card back
+    with just the affected row's state updated, instead of a tiny standalone
+    confirmation card that destroys the worklist.
+    """
+    snapshot_ids = action_data.get("snapshot_ids") or []
+    batch_id = action_data.get("batch_id", "")
+    event_id = action_data.get("event_id", "")
+    persona = action_data.get("persona", "payroll_admin")
+    user_email = action_data.get("user_email", "")
+
+    batch = store.get_batch(batch_id) or {}
+    company = store.get_company()
+    cycle = store.get_current_cycle()
+    exceptions = [e for e in (store.get_exception(eid) for eid in snapshot_ids) if e]
+
+    return build_exception_worklist_card(
+        event_id=event_id,
+        batch_id=batch_id,
+        company_name=company["name"],
+        cycle_label=cycle["label"],
+        deadline_iso=cycle["deadline"],
+        exceptions=exceptions,
+        totals=batch.get("totals") or cycle.get("totals") or {},
+        persona=persona,
+        user_email=user_email,
+    )
 
 
 def _format_money(amount: float) -> str:

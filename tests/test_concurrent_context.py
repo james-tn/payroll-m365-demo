@@ -212,3 +212,86 @@ def test_ensure_conv_ref_returns_error_when_nothing_stored(monkeypatch):
     assert "no conversation reference" in err.lower()
     assert "install" in err.lower()
     cfg_mod.get_settings.cache_clear()
+
+
+# ---- Worklist rebuild on per-row action ----
+
+
+def test_rebuild_worklist_card_preserves_open_rows_and_actions():
+    """After approving one of two exceptions, the rebuilt card must:
+       - keep all rows (1 resolved + 1 open)
+       - keep the batch-level 'Approve all' + 'Discuss' actions
+       - render the approved row WITHOUT row-level action buttons
+       - render the still-open row WITH its action buttons
+    """
+    from src.app import _rebuild_worklist_card
+    from src.flex.store import FlexStore
+
+    store = FlexStore()
+    store.reset()  # seed two exceptions
+    opens = store.list_open_exceptions()
+    assert len(opens) >= 2
+    exc_a, exc_b = opens[0], opens[1]
+    snapshot_ids = [exc_a["id"], exc_b["id"]]
+
+    # Approve A
+    store.resolve_exception(exc_a["id"], resolver="admin", notes="t")
+
+    action_data = {
+        "event_id": "evt-1",
+        "batch_id": "BATCH-2026-05B",
+        "persona": "payroll_admin",
+        "user_email": "alice@x.com",
+        "snapshot_ids": snapshot_ids,
+    }
+    card = _rebuild_worklist_card(action_data, store)
+
+    # Collect all action verbs in the rebuilt card (row + batch-level)
+    def _collect_verbs(node, acc):
+        if isinstance(node, dict):
+            if node.get("type") == "Action.Execute":
+                acc.append(node.get("verb") or (node.get("data") or {}).get("verb"))
+            for v in node.values():
+                _collect_verbs(v, acc)
+        elif isinstance(node, list):
+            for v in node:
+                _collect_verbs(v, acc)
+    verbs = []
+    _collect_verbs(card, verbs)
+
+    # Approved row contributes ZERO row-level verbs (no Approve/Flag/Explain for exc_a)
+    # Open row contributes 3; plus batch-level "approve_all_and_submit" + "discuss_batch"
+    assert verbs.count("approve_exception") == 1, f"expected 1 open row's approve, got {verbs}"
+    assert verbs.count("flag_exception") == 1
+    assert verbs.count("explain_exception") == 1
+    assert "approve_all_and_submit" in verbs
+    assert "discuss_batch" in verbs
+
+
+def test_flag_exception_keeps_row_actionable():
+    """A flagged exception stays open and keeps its row-level action buttons,
+    but renders a 🚩 badge to indicate the HR routing."""
+    from src.cards.builders import build_exception_worklist_card
+    from src.flex.store import FlexStore
+
+    store = FlexStore()
+    store.reset()
+    opens = store.list_open_exceptions()
+    exc = opens[0]
+    store.flag_exception(exc["id"], flagger="admin", notes="route")
+    refreshed = store.get_exception(exc["id"])
+    assert refreshed["flagged_for_hr"] is True
+    assert refreshed["status"] == "open"
+
+    card = build_exception_worklist_card(
+        event_id="evt-1", batch_id="BATCH-2026-05B",
+        company_name="Acme", cycle_label="May-B",
+        deadline_iso="2026-05-19T17:00:00-07:00",
+        exceptions=[refreshed], totals={"employees": 1, "gross": 1.0},
+        persona="payroll_admin", user_email="alice@x.com",
+    )
+
+    import json as _json
+    text = _json.dumps(card)
+    assert "Flagged for HR" in text
+    assert "approve_exception" in text  # row buttons still present
