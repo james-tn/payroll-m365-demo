@@ -162,8 +162,8 @@ def _conv_ref_status(persona: str) -> str:
         if stored and stored.conversation_reference.get("conversation", {}).get("id"):
             return f"✅ stored — {stored.surface} ({em})"
     if s.demo_user_aad_object_id and s.demo_user_tenant_id:
-        return "🟡 none stored — will auto-create on first Teams delivery"
-    return "❌ none stored — set DEMO_USER_AAD_OBJECT_ID for auto-create, or say hi to the bot first"
+        return "🟡 none stored — will try auto-create (or just re-add the PayCycle app in Teams to capture on install)"
+    return "❌ none stored — re-add the PayCycle app in Teams (Apps → Manage → Uninstall → Add), or set DEMO_USER_AAD_OBJECT_ID for auto-create"
 
 
 def _render(flash: str = "") -> str:

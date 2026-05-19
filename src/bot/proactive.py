@@ -192,7 +192,6 @@ async def create_personal_chat(
         "https://smba.trafficmanager.net/amer",
         "https://smba.trafficmanager.net/emea",
         "https://smba.trafficmanager.net/apac",
-        "https://smba.trafficmanager.net/ind",
     ])
 
     body = {
@@ -203,7 +202,7 @@ async def create_personal_chat(
     }
 
     token = await _get_app_token()
-    last_err = ""
+    attempts: list[str] = []
     base_used = ""
     result: Optional[dict] = None
     async with httpx.AsyncClient(timeout=30) as client:
@@ -215,9 +214,9 @@ async def create_personal_chat(
                 base_used = cand
                 logger.info("createConversation succeeded at region=%s", cand)
                 break
-            excerpt = (r.text or "")[:400]
-            last_err = f"{r.status_code} at {cand}: {excerpt}"
-            logger.warning("createConversation failed: %s", last_err)
+            excerpt = (r.text or "")[:200]
+            attempts.append(f"{cand} → {r.status_code} {excerpt}")
+            logger.warning("createConversation failed: %s → %s %s", cand, r.status_code, excerpt)
             if r.status_code == 403:
                 raise RuntimeError(
                     f"createConversation 403 - the bot's Teams app is not installed in "
@@ -225,15 +224,22 @@ async def create_personal_chat(
                     f"{user_display_name} once (Apps → search PayCycle → Add), then retry. "
                     f"({excerpt})"
                 )
-            # 404 ServiceError, 400, etc → try next region
 
     if result is None:
+        # createConversation often fails for direct 1:1 creation by AAD object id
+        # because the Bot Connector wants a Teams user MRI (29:...) which we
+        # don't have unless the user has interacted with the bot before. The
+        # cleanest workaround is to have the user re-install (or just install)
+        # the PayCycle app in Teams once - our conversationUpdate handler then
+        # captures the ConversationReference automatically without any "hi".
+        details = " | ".join(attempts)
         raise RuntimeError(
-            f"createConversation failed across all regions. Last error: {last_err}. "
-            f"Common causes: (a) the bot's Teams app is not installed in this user's "
-            f"personal scope; (b) the AAD object id is for the wrong tenant; "
-            f"(c) the user has never used Teams. Workaround: have the user open Teams "
-            f"once (no need to message the bot) and try again."
+            f"createConversation failed across all regions. "
+            f"Workaround: in Teams, remove and re-add the PayCycle app once "
+            f"(Apps → Manage your apps → ⋯ → Uninstall, then Apps → search "
+            f"PayCycle → Add). The install event will register the bot's "
+            f"conversation reference automatically - you do not need to type "
+            f"anything. Attempts: {details}"
         )
 
     conv_id = result.get("id")
