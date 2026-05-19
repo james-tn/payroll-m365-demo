@@ -182,52 +182,70 @@ they refer to.
 ### 3. Proactive Teams delivery (Mode B) — skip email entirely
 
 > The controller picks `delivery_mode=teams`. The notification arrives directly
-> in the user's PayCycle bot chat in Teams. No email is sent. **No "say hi to
-> the bot first" requirement** as long as `DEMO_USER_AAD_OBJECT_ID` is configured
-> and the bot's Teams app is installed in the user's personal scope.
+> in the user's PayCycle bot chat in Teams. No email is sent.
 
 **Implementation**: `src/demo_console/routes.py:_ensure_conv_ref`,
 `_deliver_admin_via_teams`, `_deliver_manager_via_teams`,
-`src/bot/proactive.py:create_personal_chat`, `push_card_to_stored`.
+`src/bot/proactive.py:push_card_to_stored`.
 
-`_ensure_conv_ref(persona)` is the heart of this path:
+`_ensure_conv_ref(persona)` looks up the `ConversationReference` for the
+target persona in the in-memory `ConversationStore`. If found, the card is
+pushed to that stored conversation. If not found, the controller surfaces a
+flash message pointing the operator at the install workflow.
 
-1. **Reuse**: look up `(email, persona)` in `ConversationStore`. If found,
-   short-circuit and return.
-2. **Auto-create**: if no ref exists and `DEMO_USER_AAD_OBJECT_ID` +
-   `DEMO_USER_TENANT_ID` are configured, call Bot Framework createConversation:
-   ```
-   POST {BOT_SERVICE_URL}/v3/conversations
-   Authorization: Bearer <bot-app-token from UAMI>
-   {
-     "bot":    { "id": "28:<BOT_APP_ID>" },
-     "isGroup": false,
-     "members": [{ "id": "<DEMO_USER_AAD_OBJECT_ID>" }],
-     "channelData": { "tenant": { "id": "<DEMO_USER_TENANT_ID>" } }
-   }
-   ```
-   The response gives us a `conversation.id`. We build a synthetic
-   `ConversationReference`, stash it under **both** personas (same user plays
-   both roles in the demo), and proceed to push the card.
-3. **Surface failures**: if neither config nor stored ref exists, return a
-   non-throwing flash message:
-   - "no conversation reference and auto-create is not configured…"
-   - or "auto-create failed: createConversation 403 - bot not installed in
-     this user's personal scope. Install PayCycle in Teams for the user once."
+**How the conv ref gets there in the first place**: our bot's
+`conversationUpdate` handler (`app.py:_handle_conversation_update`) captures
+the `ConversationReference` automatically every time Teams fires a
+`conversationUpdate` activity. This includes:
 
-**Prerequisites for auto-create**:
+| Event | When | Captured? |
+|---|---|---|
+| App installed in user's personal scope (first-time install) | User adds the app via Apps → Add, OR admin installs via Graph | ✅ |
+| App uninstalled + reinstalled | Apps → Manage → Uninstall → Add | ✅ |
+| App version bump + Update | Manifest version increment, then re-upload | ✅ |
+| Re-upload of identical package | (Teams sees no change) | ❌ |
+| User sends any message | Any text in the bot chat | ✅ (via `_handle_message`) |
 
-| Required | Why |
-|---|---|
-| `BOT_APP_ID` + bot token (UAMI in this deployment) | Authenticates the createConversation call. |
-| `DEMO_USER_AAD_OBJECT_ID` (env var) | Identifies the user in `members[].id`. Look up with `az ad user show --id <upn> --query id -o tsv`. |
-| `DEMO_USER_TENANT_ID` (env var) | Required by Teams to route to the user's tenant. |
-| `BOT_SERVICE_URL` (env var, defaults to `https://smba.trafficmanager.net/amer/`) | Regional Teams Bot Connector endpoint where createConversation POSTs. Valid regions: `/amer/`, `/emea/`, `/apac/`, `/ind/`. The code falls through all of them if the configured one returns 404. |
-| **Bot app installed in user's personal scope** | The user must have the PayCycle Teams app installed (via sideload or org catalog). Without this, createConversation returns 403. This is a **one-time** step per user, not a per-notification step. |
+So in the normal flow, **a user never has to type "hi"**: install captures
+the conv ref on its own. The only fall-back "say hi" path exists for stale
+state recovery (e.g. the package was re-uploaded without a version bump and
+the install event never fired).
 
-Once a chat is created, the conv ref persists for the lifetime of the
-container; subsequent deliveries to either persona reuse it without another
-createConversation round-trip.
+### 3.1 Production note: persistent ConversationStore
+
+The current `ConversationStore` is **in-memory only** — every container
+restart wipes it, after which users with already-installed apps need to
+either re-install or send one message to re-register their conv ref.
+
+For production, back the store with persistent storage (Cosmos DB, Redis,
+SQL, etc.):
+
+- **Once a conv ref is captured, it persists indefinitely.** Bot Framework
+  conv refs are stable for the life of the bot↔user chat installation.
+- **Deploys become invisible to users.** No re-install, no re-greeting.
+- **Proactive messaging "just works"** for any user with the app installed.
+
+### 3.2 Zero-touch onboarding for new tenants (Graph install API)
+
+If you also want to skip the user's initial Apps → Add step (e.g., for an
+enterprise rollout where IT wants the bot pre-installed for all payroll
+users), use Microsoft Graph instead of asking users to install:
+
+```
+POST https://graph.microsoft.com/v1.0/users/{upn}/teamwork/installedApps
+{ "teamsApp@odata.bind":
+    "https://graph.microsoft.com/v1.0/appCatalogs/teamsApps/{teamsAppId}" }
+```
+
+This requires the application permission
+`TeamsAppInstallation.ReadWriteForUser.All` with one-time admin consent
+during onboarding. Once installed, Teams fires `conversationUpdate` to the
+bot, which captures the conv ref into the persistent store. The user then
+sees PayCycle pre-installed in Teams and the very first notification arrives
+with zero user action.
+
+This is the production-grade "ISV never needs the user's AAD object id"
+pattern. The ISV's data layer only needs the user's **email/UPN**.
 
 - The proactive Teams card uses **the same handoff token** as the email
   variant would have. Any "Discuss with PayCycle agent" or post-action follow-up

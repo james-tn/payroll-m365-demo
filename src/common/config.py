@@ -29,14 +29,10 @@ class Settings(BaseSettings):
 
     # Demo personas
     demo_user_email: str = "james.nguyen@microsoft.com"
-    demo_user_tenant_id: str = ""
-    demo_user_aad_object_id: str = ""  # for proactive auto-create of Teams chat
+    demo_user_tenant_id: str = ""  # legacy / unused; retained for backcompat with old .env files
+    demo_user_aad_object_id: str = ""  # legacy / unused; retained for backcompat with old .env files
     demo_admin_email: str = "james.nguyen@microsoft.com"
     demo_manager_email: str = "james.nguyen@microsoft.com"
-
-    # Bot Framework Connector service URL — used for proactive createConversation
-    # when no ConversationReference is already stored. Default works for any tenant.
-    bot_service_url: str = "https://smba.trafficmanager.net/amer/"
 
     # Actionable email
     oam_originator_id: str = ""
