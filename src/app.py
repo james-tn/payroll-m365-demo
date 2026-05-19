@@ -249,6 +249,15 @@ async def _handle_message(activity: dict) -> Response:
     persona = await _resolve_persona(activity)
     store = get_conversation_store()
     stored = store.upsert_from_activity(activity, persona=persona)
+    # In the demo a single user plays BOTH personas - also register the same
+    # conv ref under the other persona so proactive pushes targeting either
+    # role find a chat without needing a second user-initiated message.
+    other_persona = "payroll_manager" if persona == "payroll_admin" else "payroll_admin"
+    try:
+        other_stored = store.upsert_from_activity(activity, persona=other_persona)
+        store.alias_to_emails(other_stored, [settings.demo_admin_email, settings.demo_manager_email])
+    except Exception as e:
+        logger.warning("failed to mirror conv ref to other persona: %s", e)
     # Also alias under the configured demo email(s) for the OTHER persona so that
     # an email handoff sent under a different persona key can find this chat.
     store.alias_to_emails(stored, [settings.demo_admin_email, settings.demo_manager_email])
