@@ -28,9 +28,9 @@ cj = ""
     cj = cj & """value"":""application/json""}]},{""type"":""Action.Http"",""title"":""\ud83d\udea9 Flag for HR"",""method"":""POST"",""url"":""https://payroll-m365-demo.politeground-c0ea36c5.eastus2.azurecontainer"
     cj = cj & "apps.io/cta/oam/flag-exception/EXC-2026-05B-002"",""body"":"""",""headers"":[{""name"":""Content-Type"",""value"":""application/json""}]}]}]}],""actions"":[{""type"":""Action.OpenUrl"",""title"":""Review "
     cj = cj & "with PayCycle Assistant"",""url"":""https://payroll-m365-demo.politeground-c0ea36c5.eastus2.azurecontainerapps.io/cta/handoff?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwdXJwb3NlIjo"
-    cj = cj & "iaGFuZG9mZiIsInN1YiI6ImphbWVzLm5ndXllbkBtaWNyb3NvZnQuY29tIiwiaWF0IjoxNzc5MTU1MDU1LCJleHAiOjE3NzkyNDE0NTUsImp0aSI6IjcyYzYyOGNkLWJlODItNGQ4Ny1iMTllLTNmZjczZGQyZTQzMCIsInBlcnNvbmEiOiJ"
+    cj = cj & "iaGFuZG9mZiIsInN1YiI6ImphbWVzLm5ndXllbkBtaWNyb3NvZnQuY29tIiwiaWF0IjoxNzc5MTU3NDE3LCJleHAiOjE3NzkyNDM4MTcsImp0aSI6IjgyY2YzOTA2LTA1ZTgtNDQyMy05YjAzLTA1NTkyNDZmMDk5OCIsInBlcnNvbmEiOiJ"
     cj = cj & "wYXlyb2xsX2FkbWluIiwiYmF0Y2hfaWQiOiJCQVRDSC0yMDI2LTA1QiIsImludGVudCI6InJldmlld19leGNlcHRpb25zIiwiZXZlbnQiOiJhbGVydC9DWUMtMjAyNi0wNUIiLCJleGNlcHRpb25faWRzIjpbIkVYQy0yMDI2LTA1Qi0wMDE"
-    cj = cj & "iLCJFWEMtMjAyNi0wNUItMDAyIl19.Jzg0NMRb1UdsTKgFLTTFf_7qwEUwz-0aQFT09IG9duM&surface=teams""}]}"
+    cj = cj & "iLCJFWEMtMjAyNi0wNUItMDAyIl19.Y8zj7wPKe842MkE8ZJz4pUf4TXxHvW1dEfQTDxGmeSk&surface=teams""}]}"
 
     Dim html As String
     html = "<!DOCTYPE html><html><head><meta charset=""utf-8"">"

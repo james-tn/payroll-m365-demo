@@ -35,6 +35,8 @@ class Settings(BaseSettings):
 
     # Actionable email
     oam_originator_id: str = ""
+    oam_app_id_uri: str = ""
+    oam_entra_app_id: str = ""
 
     # Signed token
     cta_token_secret: str = "dev-only-secret-change-me"

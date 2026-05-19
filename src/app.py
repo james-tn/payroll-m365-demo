@@ -626,10 +626,8 @@ async def _verify_oam_request(request: Request) -> dict:
         raise OamAuthError("missing bearer token")
     token = auth.split(" ", 1)[1].strip()
     settings = get_settings()
-    allowed = {s for s in (settings.acs_sender_address, settings.demo_admin_email, settings.demo_manager_email, "james.nguyen@microsoft.com") if s}
-    return await verify_oam_bearer(
-        token, expected_audience=_request_aud(request), allowed_senders=allowed,
-    )
+    auds = [settings.oam_app_id_uri, settings.oam_entra_app_id]
+    return await verify_oam_bearer(token, expected_audiences=auds)
 
 
 @app.post("/cta/oam/approve-exception/{exception_id}")
