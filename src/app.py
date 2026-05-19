@@ -32,6 +32,7 @@ from .cards.builders import (
 )
 from .common.config import get_settings
 from .common.logging import get_logger, init_logging
+from .common.oam_auth import OamAuthError, verify_oam_bearer
 from .common.tokens import TokenError, mint, verify
 from .demo_console.routes import router as demo_router
 from .email_service.sender import send_email
@@ -591,6 +592,101 @@ async def cta_flag_exception(request: Request) -> Response:
         message=f"{exc['title']} ({exc['id']}) flagged by {actor}.",
         sub="HR will review and follow up. Exception stays open until they action it.",
     ))
+
+
+# ---- Per-exception POST endpoints (used by Action.Http buttons in OAM cards) ----
+# These fire silently from inside Outlook (no browser tab). The bearer token in
+# Authorization is minted by the Microsoft substrate; we validate it against the
+# substrate JWKS and use the `sub` claim as the approver identity.
+
+def _request_aud(request: Request) -> str:
+    """Compute the URL Outlook would have used as the `aud` claim.
+
+    Container Apps forwards X-Forwarded-Proto/Host so we honor those before
+    request.url (which sometimes reports the in-cluster scheme/host).
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}{request.url.path}"
+
+
+def _oam_action_error(status: int, msg: str) -> Response:
+    """Return a response that Outlook will surface as a red toast on the card."""
+    return JSONResponse(
+        content={"error": msg},
+        status_code=status,
+        headers={"CARD-ACTION-STATUS": f"Error: {msg[:120]}"},
+    )
+
+
+async def _verify_oam_request(request: Request) -> dict:
+    """Pull the bearer off the request and validate it. Raises OamAuthError on failure."""
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise OamAuthError("missing bearer token")
+    token = auth.split(" ", 1)[1].strip()
+    settings = get_settings()
+    allowed = {s for s in (settings.acs_sender_address, settings.demo_admin_email, settings.demo_manager_email, "james.nguyen@microsoft.com") if s}
+    return await verify_oam_bearer(
+        token, expected_audience=_request_aud(request), allowed_senders=allowed,
+    )
+
+
+@app.post("/cta/oam/approve-exception/{exception_id}")
+async def cta_oam_approve_exception(exception_id: str, request: Request) -> Response:
+    try:
+        claims = await _verify_oam_request(request)
+    except OamAuthError as e:
+        logger.warning("oam approve auth failed exc=%s err=%s", exception_id, e)
+        return _oam_action_error(401, str(e))
+    approver = claims.get("sub") or claims.get("upn") or claims.get("email") or "unknown"
+    try:
+        exc = get_store().resolve_exception(
+            exception_id, resolver=approver,
+            notes=f"Approved via Outlook Action.Http at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        )
+    except KeyError:
+        return _oam_action_error(404, f"Exception {exception_id} not found")
+    logger.info("oam approve ok exc=%s approver=%s", exception_id, approver)
+    refresh = build_action_confirmation(
+        title=f"✅ Approved · {exc['employee_name']}",
+        message=f"{exc['title']} ({exc['id']}) resolved by {approver}.",
+        sub=f"Impact ${exc['amount_impact']:,.2f} is included in the batch.",
+    )
+    return JSONResponse(
+        content=refresh,
+        headers={
+            "CARD-ACTION-STATUS": f"✓ Approved {exc['employee_name']}",
+            "CARD-UPDATE-IN-BODY": "true",
+        },
+    )
+
+
+@app.post("/cta/oam/flag-exception/{exception_id}")
+async def cta_oam_flag_exception(exception_id: str, request: Request) -> Response:
+    try:
+        claims = await _verify_oam_request(request)
+    except OamAuthError as e:
+        logger.warning("oam flag auth failed exc=%s err=%s", exception_id, e)
+        return _oam_action_error(401, str(e))
+    actor = claims.get("sub") or claims.get("upn") or claims.get("email") or "unknown"
+    exc = get_store().get_exception(exception_id)
+    if not exc:
+        return _oam_action_error(404, f"Exception {exception_id} not found")
+    logger.info("oam flag ok exc=%s actor=%s", exception_id, actor)
+    refresh = build_action_confirmation(
+        title=f"🚩 Flagged for HR · {exc['employee_name']}",
+        message=f"{exc['title']} ({exc['id']}) flagged by {actor}.",
+        sub="HR will review and follow up. Exception stays open until actioned.",
+        style="warning",
+    )
+    return JSONResponse(
+        content=refresh,
+        headers={
+            "CARD-ACTION-STATUS": f"🚩 Flagged {exc['employee_name']} for HR",
+            "CARD-UPDATE-IN-BODY": "true",
+        },
+    )
 
 
 @app.get("/cta/handoff")
