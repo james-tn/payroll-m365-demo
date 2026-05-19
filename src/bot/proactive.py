@@ -150,6 +150,82 @@ async def push_card_to_stored(stored: StoredConversation, card: dict, text: str 
             return {"status": r.status_code}
 
 
+async def create_personal_chat(
+    *,
+    user_aad_object_id: str,
+    user_display_name: str,
+    tenant_id: str,
+    service_url: Optional[str] = None,
+) -> dict:
+    """Create (or get) a 1:1 personal chat conversation between the bot and a user.
+
+    Uses the Bot Framework Connector createConversation API:
+        POST {serviceUrl}/v3/conversations
+        body: { bot, isGroup=false, members=[{id: aadObjectId}], channelData.tenant.id }
+
+    Returns a ConversationReference-shaped dict ready to be stashed in the
+    ConversationStore and used with push_card_to_stored.
+
+    Prerequisites:
+      - The bot's Teams app MUST be installed in the user's personal scope
+        (Teams → Apps → install). If not, createConversation returns 403.
+      - A valid app-only Bot Framework token (UAMI / client_credentials).
+
+    Raises RuntimeError with a helpful message on failure.
+    """
+    s = get_settings()
+    if not s.bot_app_id:
+        raise RuntimeError("BOT_APP_ID is required")
+    if not user_aad_object_id:
+        raise RuntimeError("user_aad_object_id is required")
+    if not tenant_id:
+        raise RuntimeError("tenant_id is required")
+
+    base = (service_url or s.bot_service_url or "https://smba.trafficmanager.net/teams/").rstrip("/")
+    url = f"{base}/v3/conversations"
+    body = {
+        "bot": {"id": f"28:{s.bot_app_id}"},
+        "isGroup": False,
+        "members": [{"id": user_aad_object_id}],
+        "channelData": {"tenant": {"id": tenant_id}},
+    }
+
+    token = await _get_app_token()
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, json=body, headers={"Authorization": f"Bearer {token}"})
+        if r.status_code >= 300:
+            excerpt = (r.text or "")[:400]
+            if r.status_code == 403:
+                raise RuntimeError(
+                    f"createConversation 403 - the bot's Teams app is not installed in "
+                    f"this user's personal scope. Install PayCycle in Teams for "
+                    f"{user_display_name} once (Apps → search PayCycle → Add), then retry. "
+                    f"({excerpt})"
+                )
+            raise RuntimeError(
+                f"createConversation {r.status_code}: {excerpt}"
+            )
+        result = r.json()
+
+    conv_id = result.get("id")
+    if not conv_id:
+        raise RuntimeError(f"createConversation returned no conversation id: {result}")
+
+    logger.info(
+        "auto-created Teams 1:1 chat conv=%s user=%s tenant=%s",
+        conv_id[:24], user_display_name, tenant_id,
+    )
+
+    return {
+        "channelId": "msteams",
+        "user": {"id": user_aad_object_id, "name": user_display_name or user_aad_object_id,
+                 "aadObjectId": user_aad_object_id},
+        "bot": {"id": f"28:{s.bot_app_id}", "name": "PayCycle"},
+        "conversation": {"id": conv_id, "tenantId": tenant_id},
+        "serviceUrl": base + "/",
+    }
+
+
 async def create_copilot_proactive_thread(user_aad_object_id: str, tenant_id: str) -> dict:
     """Create a new Copilot proactive notification thread for a user.
 

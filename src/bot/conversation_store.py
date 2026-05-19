@@ -42,7 +42,14 @@ class ConversationStore:
             user_email = (activity.get("from") or {}).get("aadObjectId") or (activity.get("from") or {}).get("name") or ""
             user_id = (activity.get("from") or {}).get("id", "")
             user_email_actual = (activity.get("from") or {}).get("email") or user_email
+            aad_oid = (activity.get("from") or {}).get("aadObjectId") or ""
             tenant_id = ((activity.get("channelData") or {}).get("tenant") or {}).get("id") or activity.get("conversation", {}).get("tenantId") or ""
+            if aad_oid:
+                import logging
+                logging.getLogger("payroll.demo").info(
+                    "captured inbound activity: aadObjectId=%s tenant=%s persona=%s name=%s",
+                    aad_oid, tenant_id, persona, user_email_actual,
+                )
             channel_id = activity.get("channelId", "")
             conv_id = (activity.get("conversation") or {}).get("id", "")
             service_url = activity.get("serviceUrl", "")
@@ -168,6 +175,38 @@ class ConversationStore:
             drained = list(sc.pending_cards)
             sc.pending_cards = []
             return drained
+
+    def upsert_synthetic(
+        self,
+        *,
+        email: str,
+        persona: str,
+        ref: dict,
+        surface: str = "teams",
+    ) -> StoredConversation:
+        """Insert a StoredConversation built from a freshly-created conversation
+        reference (e.g. one returned by createConversation), preserving any
+        existing pending-card queue under the (email, persona) key.
+
+        Use this when you have created a 1:1 chat proactively (before the user
+        has ever messaged the bot) so subsequent proactive pushes work.
+        """
+        with self._lock:
+            key = (email.lower(), persona)
+            existing = self._by_user_persona.get(key)
+            sc = StoredConversation(
+                user_email=email,
+                user_tenant_id=(ref.get("conversation") or {}).get("tenantId", ""),
+                persona=persona,
+                surface=surface,
+                conversation_reference=ref,
+                pending_cards=existing.pending_cards if existing else [],
+            )
+            self._by_user_persona[key] = sc
+            conv_id = (ref.get("conversation") or {}).get("id", "")
+            if conv_id:
+                self._by_conv_id[conv_id] = sc
+            return sc
 
     # ---- Compat shims for older single-slot callers ----
 

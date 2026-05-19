@@ -7,8 +7,8 @@ from typing import Any
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from ..bot.conversation_store import get_conversation_store
-from ..bot.proactive import push_card_to_stored
+from ..bot.conversation_store import get_conversation_store, StoredConversation
+from ..bot.proactive import create_personal_chat, push_card_to_stored
 from ..cards.builders import (
     build_admin_exception_notification,
     build_exception_worklist_card,
@@ -160,8 +160,10 @@ def _conv_ref_status(persona: str) -> str:
             continue
         stored = conv_store.get_by_user(em, persona)
         if stored and stored.conversation_reference.get("conversation", {}).get("id"):
-            return f"✅ {stored.surface} ({em})"
-    return "❌ none (say hi to the bot first for proactive delivery)"
+            return f"✅ stored — {stored.surface} ({em})"
+    if s.demo_user_aad_object_id and s.demo_user_tenant_id:
+        return "🟡 none stored — will auto-create on first Teams delivery"
+    return "❌ none stored — set DEMO_USER_AAD_OBJECT_ID for auto-create, or say hi to the bot first"
 
 
 def _render(flash: str = "") -> str:
@@ -404,22 +406,71 @@ async def _deliver_via_email(*, to: str, subject: str, html_body: str, plain_tex
         return f"📧 ❌ Email failed: {type(e).__name__}: {e}"
 
 
-async def _deliver_admin_via_teams(artifacts: dict) -> str:
-    """Push the admin worklist card directly into the Teams bot chat (no email)."""
+async def _ensure_conv_ref(persona: str) -> tuple[StoredConversation | None, str | None]:
+    """Return (stored_conversation, error_message) for the given persona.
+
+    1. First, try to find an existing ConversationReference in the store under
+       any of the canonical demo email keys.
+    2. If none and DEMO_USER_AAD_OBJECT_ID + DEMO_USER_TENANT_ID are configured,
+       attempt to create a fresh 1:1 chat via Bot Framework createConversation.
+       Stash the result under BOTH personas (the same user plays both roles in
+       the demo, so a single conv ref serves both).
+    3. Otherwise return a user-friendly error message that the controller can
+       surface via the flash banner.
+
+    Either tuple slot can be None — both slots None is impossible.
+    """
     s = get_settings()
     conv_store = get_conversation_store()
-    persona = "payroll_admin"
-    stored = None
-    for em in (s.demo_user_email, s.demo_admin_email):
+
+    # (1) Existing ref?
+    for em in (s.demo_user_email, s.demo_admin_email, s.demo_manager_email):
         if not em:
             continue
         stored = conv_store.get_by_user(em, persona)
-        if stored and stored.conversation_reference.get("conversation", {}).get("id"):
-            break
-        stored = None
-    if not stored:
-        return ("💬 ❌ Teams: no conversation reference for the admin persona yet. "
-                "Open the PayCycle bot in Teams and send one message ('hi'), then retry.")
+        if stored and (stored.conversation_reference.get("conversation") or {}).get("id"):
+            return stored, None
+
+    # (2) Try auto-create
+    if not s.demo_user_aad_object_id or not s.demo_user_tenant_id:
+        return None, (
+            "💬 ❌ Teams: no conversation reference and auto-create is not "
+            "configured. Set DEMO_USER_AAD_OBJECT_ID and DEMO_USER_TENANT_ID "
+            "(see .env.example) or have the user send one message to the bot."
+        )
+
+    try:
+        ref = await create_personal_chat(
+            user_aad_object_id=s.demo_user_aad_object_id,
+            user_display_name=s.demo_user_email,
+            tenant_id=s.demo_user_tenant_id,
+        )
+    except Exception as e:
+        logger.exception("auto-create personal chat failed")
+        return None, f"💬 ❌ Teams: auto-create failed: {type(e).__name__}: {e}"
+
+    # Stash under BOTH personas (single demo user plays both) so subsequent
+    # deliveries for either persona reuse the same chat.
+    sc_admin = conv_store.upsert_synthetic(
+        email=s.demo_user_email, persona="payroll_admin", ref=ref, surface="teams",
+    )
+    sc_manager = conv_store.upsert_synthetic(
+        email=s.demo_user_email, persona="payroll_manager", ref=ref, surface="teams",
+    )
+    # Alias each persona's StoredConversation under the configured persona emails
+    conv_store.alias_to_emails(sc_admin, [s.demo_admin_email, s.demo_manager_email])
+    conv_store.alias_to_emails(sc_manager, [s.demo_admin_email, s.demo_manager_email])
+
+    return (sc_admin if persona == "payroll_admin" else sc_manager), None
+
+
+async def _deliver_admin_via_teams(artifacts: dict) -> str:
+    """Push the admin worklist card directly into the Teams bot chat (no email)."""
+    s = get_settings()
+    persona = "payroll_admin"
+    stored, err = await _ensure_conv_ref(persona)
+    if err or not stored:
+        return err or "💬 ❌ Teams: no conversation reference."
 
     teams_card = build_exception_worklist_card(
         event_id=artifacts["handoff_token"][-12:],
@@ -452,19 +503,10 @@ async def _deliver_admin_via_teams(artifacts: dict) -> str:
 async def _deliver_manager_via_teams(artifacts: dict) -> str:
     """Push the manager approval context card directly into Teams (no email)."""
     s = get_settings()
-    conv_store = get_conversation_store()
     persona = "payroll_manager"
-    stored = None
-    for em in (s.demo_user_email, s.demo_manager_email):
-        if not em:
-            continue
-        stored = conv_store.get_by_user(em, persona)
-        if stored and stored.conversation_reference.get("conversation", {}).get("id"):
-            break
-        stored = None
-    if not stored:
-        return ("💬 ❌ Teams: no conversation reference for the manager persona yet. "
-                "Open the PayCycle bot in Teams and send one message ('hi'), then retry.")
+    stored, err = await _ensure_conv_ref(persona)
+    if err or not stored:
+        return err or "💬 ❌ Teams: no conversation reference."
 
     batch = artifacts["batch"]
     facts = [

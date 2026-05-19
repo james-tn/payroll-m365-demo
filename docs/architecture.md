@@ -182,33 +182,58 @@ they refer to.
 ### 3. Proactive Teams delivery (Mode B) — skip email entirely
 
 > The controller picks `delivery_mode=teams`. The notification arrives directly
-> in the user's PayCycle bot chat in Teams. No email is sent.
+> in the user's PayCycle bot chat in Teams. No email is sent. **No "say hi to
+> the bot first" requirement** as long as `DEMO_USER_AAD_OBJECT_ID` is configured
+> and the bot's Teams app is installed in the user's personal scope.
 
-**Implementation**: `src/demo_console/routes.py:_deliver_admin_via_teams`,
-`_deliver_manager_via_teams`, plus existing `src/bot/proactive.py:push_card_to_stored`.
+**Implementation**: `src/demo_console/routes.py:_ensure_conv_ref`,
+`_deliver_admin_via_teams`, `_deliver_manager_via_teams`,
+`src/bot/proactive.py:create_personal_chat`, `push_card_to_stored`.
 
-```python
-async def _deliver_admin_via_teams(artifacts):
-    stored = conv_store.get_by_user(email, "payroll_admin")
-    if not stored:
-        return "💬 ❌ Teams: no conversation reference yet. Say hi to the bot first."
-    teams_card = build_exception_worklist_card(...)   # Action.Execute verbs
-    await push_card_to_stored(stored, teams_card, text="🔔 PayCycle: ...")
-```
+`_ensure_conv_ref(persona)` is the heart of this path:
+
+1. **Reuse**: look up `(email, persona)` in `ConversationStore`. If found,
+   short-circuit and return.
+2. **Auto-create**: if no ref exists and `DEMO_USER_AAD_OBJECT_ID` +
+   `DEMO_USER_TENANT_ID` are configured, call Bot Framework createConversation:
+   ```
+   POST {BOT_SERVICE_URL}/v3/conversations
+   Authorization: Bearer <bot-app-token from UAMI>
+   {
+     "bot":    { "id": "28:<BOT_APP_ID>" },
+     "isGroup": false,
+     "members": [{ "id": "<DEMO_USER_AAD_OBJECT_ID>" }],
+     "channelData": { "tenant": { "id": "<DEMO_USER_TENANT_ID>" } }
+   }
+   ```
+   The response gives us a `conversation.id`. We build a synthetic
+   `ConversationReference`, stash it under **both** personas (same user plays
+   both roles in the demo), and proceed to push the card.
+3. **Surface failures**: if neither config nor stored ref exists, return a
+   non-throwing flash message:
+   - "no conversation reference and auto-create is not configured…"
+   - or "auto-create failed: createConversation 403 - bot not installed in
+     this user's personal scope. Install PayCycle in Teams for the user once."
+
+**Prerequisites for auto-create**:
+
+| Required | Why |
+|---|---|
+| `BOT_APP_ID` + bot token (UAMI in this deployment) | Authenticates the createConversation call. |
+| `DEMO_USER_AAD_OBJECT_ID` (env var) | Identifies the user in `members[].id`. Look up with `az ad user show --id <upn> --query id -o tsv`. |
+| `DEMO_USER_TENANT_ID` (env var) | Required by Teams to route to the user's tenant. |
+| `BOT_SERVICE_URL` (env var, defaults to `https://smba.trafficmanager.net/teams/`) | Where createConversation POSTs to. The default works for any tenant. |
+| **Bot app installed in user's personal scope** | The user must have the PayCycle Teams app installed (via sideload or org catalog). Without this, createConversation returns 403. This is a **one-time** step per user, not a per-notification step. |
+
+Once a chat is created, the conv ref persists for the lifetime of the
+container; subsequent deliveries to either persona reuse it without another
+createConversation round-trip.
 
 - The proactive Teams card uses **the same handoff token** as the email
   variant would have. Any "Discuss with PayCycle agent" or post-action follow-up
   has identical downstream behavior.
 - `push_card_to_stored` uses the cached app-only Bot Framework token (acquired
   via UAMI federated identity in this deployment — see `src/bot/proactive.py`).
-- If no `ConversationReference` exists for `(user, persona)`, the delivery is
-  surfaced as a non-throwing failure in the controller flash message:
-  `💬 ❌ Teams: no conversation reference for the admin persona yet. Say hi to the bot first.`
-
-Prerequisite for Mode B: the user must have messaged the bot **at least once**
-in the past so a `ConversationReference` is in the store. In production this is
-typically bootstrapped at app-install time via the bot's `conversationUpdate`
-event handler.
 
 ### 4. Controller-side delivery toggle
 
