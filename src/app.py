@@ -545,6 +545,54 @@ async def cta_reject(request: Request) -> Response:
     return _outlook_card_response(card)
 
 
+# ---- Per-exception GET endpoints (used by Action.OpenUrl buttons in OAM cards) ----
+# These let us do per-row Approve / Flag from inside Outlook without needing
+# the Action.Http authentication wiring (which requires the OAM-Entra-ID flow).
+
+@app.get("/cta/approve-exception")
+async def cta_approve_exception(request: Request) -> Response:
+    token = request.query_params.get("token", "")
+    try:
+        claims = verify(token, expected_purpose="approve_exception", mark_used=True)
+    except TokenError as e:
+        return HTMLResponse(_simple_error_page("Link expired or invalid", str(e)), status_code=400)
+    exc_id = claims.get("exception_id", "")
+    approver = claims.get("sub", "manager")
+    try:
+        exc = get_store().resolve_exception(
+            exc_id, resolver=approver,
+            notes=f"Approved via Outlook actionable email at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        )
+    except KeyError:
+        return HTMLResponse(_simple_error_page("Exception not found", exc_id), status_code=404)
+    return HTMLResponse(_simple_success_page(
+        title=f"✅ Approved · {exc['employee_name']}",
+        message=f"{exc['title']} ({exc['id']}) resolved by {approver}.",
+        sub=f"Impact ${exc['amount_impact']:,.2f} is now included in batch {claims.get('batch_id', '')}.",
+    ))
+
+
+@app.get("/cta/flag-exception")
+async def cta_flag_exception(request: Request) -> Response:
+    token = request.query_params.get("token", "")
+    try:
+        claims = verify(token, expected_purpose="flag_exception", mark_used=True)
+    except TokenError as e:
+        return HTMLResponse(_simple_error_page("Link expired or invalid", str(e)), status_code=400)
+    exc_id = claims.get("exception_id", "")
+    actor = claims.get("sub", "user")
+    exc = get_store().get_exception(exc_id)
+    if not exc:
+        return HTMLResponse(_simple_error_page("Exception not found", exc_id), status_code=404)
+    # Don't resolve - just record the flag for HR review
+    logger.info("exception flagged for HR exception_id=%s actor=%s", exc_id, actor)
+    return HTMLResponse(_simple_success_page(
+        title=f"🚩 Flagged for HR · {exc['employee_name']}",
+        message=f"{exc['title']} ({exc['id']}) flagged by {actor}.",
+        sub="HR will review and follow up. Exception stays open until they action it.",
+    ))
+
+
 @app.get("/cta/handoff")
 async def cta_handoff(request: Request) -> Response:
     """User clicked 'Discuss in Teams/Copilot' in Outlook.
@@ -740,3 +788,13 @@ def _simple_redirect_page(title: str, message: str, url: str) -> str:
 </head><body><h2 style="color:#2667ff">{title}</h2><p>{message}</p>
 <p><a href="{url}" style="background:#2667ff;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none">
 Open now</a></p></body></html>"""
+
+
+def _simple_success_page(title: str, message: str, sub: str = "") -> str:
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+<style>body{{font-family:Segoe UI,Arial;max-width:520px;margin:80px auto;padding:24px;color:#333;text-align:center}}
+.card{{background:#f5fbf7;border:1px solid #b7e1c3;border-radius:8px;padding:24px}}
+.sub{{color:#666;font-size:14px;margin-top:12px}}</style>
+</head><body><div class="card"><h2 style="color:#107c10;margin:0">{title}</h2>
+<p>{message}</p>{f'<p class="sub">{sub}</p>' if sub else ''}</div>
+<p style="color:#999;margin-top:24px;font-size:13px">You can close this tab.</p></body></html>"""
